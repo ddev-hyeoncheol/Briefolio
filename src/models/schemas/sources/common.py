@@ -18,8 +18,8 @@ class SourceEnrichedArticleSchema(BaseModel):
     image_url: str | None = Field(default=None, description="HTML-extracted representative image URL")
     language: str | None = Field(default=None, description="HTML-declared language code")
     content: str | None = Field(default=None, description="HTML-extracted article body text")
-    status_code: int | None = Field(default=None, description="Bronze item HTTP status code")
-    error_message: str | None = Field(default=None, description="Bronze item error message")
+    status_code: int | None = Field(default=None, description="Item HTTP status code")
+    error_message: str | None = Field(default=None, description="Item error message")
 
     model_config = ConfigDict(
         extra="ignore",

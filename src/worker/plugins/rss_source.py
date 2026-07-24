@@ -1,10 +1,8 @@
 import asyncio
 import random
-import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from datetime import datetime
-from urllib.parse import urlsplit, urlunsplit
 
 import feedparser
 import httpx
@@ -14,13 +12,10 @@ from tenacity import retry, retry_if_result, stop_after_attempt, wait_fixed
 from src.config.config import settings
 from src.core.logger import get_logger
 from src.core.transient import is_transient_http_status_code
-from src.models.entities.bronze_news import BronzeNewsModel
+from src.models.entities.news import NewsModel
 from src.models.schemas.sources.common import SourceEnrichedArticleSchema
 
 logger = get_logger(__name__)
-
-
-_NAMESPACE_UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "gemini-news-brief")
 
 _retry = retry(
     retry=retry_if_result(lambda res: is_transient_http_status_code(res[0])),
@@ -76,15 +71,6 @@ class RssSource(ABC):
         """Return exact non-article boilerplate content keyed by diagnostic name."""
         return {}
 
-    def _find_matching_boilerplate(self, content: str | None) -> str | None:
-        """Return the diagnostic name for exact boilerplate content matches."""
-        if content is None:
-            return None
-        for name, boilerplate in self.BOILERPLATE_CONTENTS.items():
-            if content == boilerplate:
-                return name
-        return None
-
     def __init__(self, semaphore: asyncio.Semaphore) -> None:
         """Initialize with a shared semaphore to limit concurrent enrich requests."""
         self._semaphore = semaphore
@@ -92,11 +78,11 @@ class RssSource(ABC):
         self._newspaper_config = newspaper.Config()
 
     @abstractmethod
-    async def run_fetch(self, executed_at: datetime) -> list[BronzeNewsModel]:
-        """Fetch raw RSS feed and map to BronzeNewsModel entities without enrichment."""
+    async def run_fetch(self, executed_at: datetime) -> list[NewsModel]:
+        """Fetch raw RSS feed and map to NewsModel entities without enrichment."""
         pass
 
-    async def run_enrich(self, items: list[BronzeNewsModel]) -> list[BronzeNewsModel]:
+    async def run_enrich(self, items: list[NewsModel]) -> list[NewsModel]:
         """
         Enrich targeted items with full article content in parallel.
 
@@ -114,7 +100,7 @@ class RssSource(ABC):
         tasks = [self._enrich(item.entry_url) for item in items]
         enrichments = await asyncio.gather(*tasks)
 
-        unique_candidates: dict[str, BronzeNewsModel] = {}
+        unique_candidates: dict[str, NewsModel] = {}
 
         for item, enriched in zip(items, enrichments):
             content = enriched.content
@@ -140,14 +126,10 @@ class RssSource(ABC):
                         else "Content unavailable::empty content"
                     )
 
-            target_url = enriched.canonical_url or item.entry_url
-            news_id = self._make_id(target_url)
-
             # Dump enriched schema properties directly and overlay normalized enrichment fields and diagnostics.
             update_fields = enriched.model_dump(exclude={"status_code", "error_message"})
             update_fields.update(
                 {
-                    "news_id": news_id,
                     "content": content,
                     "status": status,
                     "status_code": status_code,
@@ -157,9 +139,9 @@ class RssSource(ABC):
 
             new_item = item.model_copy(update=update_fields)
 
-            existing_item = unique_candidates.get(news_id)
+            existing_item = unique_candidates.get(new_item.news_id)
             if existing_item is None or (existing_item.status != "success" and new_item.status == "success"):
-                unique_candidates[news_id] = new_item
+                unique_candidates[new_item.news_id] = new_item
 
         deduplicated_items = list(unique_candidates.values())
         success_count = sum(1 for item in deduplicated_items if item.status == "success")
@@ -172,6 +154,15 @@ class RssSource(ABC):
             failed_count,
         )
         return deduplicated_items
+
+    def _find_matching_boilerplate(self, content: str | None) -> str | None:
+        """Return the diagnostic name for exact boilerplate content matches."""
+        if content is None:
+            return None
+        for name, boilerplate in self.BOILERPLATE_CONTENTS.items():
+            if content == boilerplate:
+                return name
+        return None
 
     async def _fetch_feed(self) -> feedparser.FeedParserDict:
         """Fetch raw RSS feed using feedparser and validate HTTP status."""
@@ -222,12 +213,6 @@ class RssSource(ABC):
         except Exception as e:
             # Network error or unexpected exception before receiving an HTTP response.
             return None, None, f"Network error::{type(e).__name__}::{e}"
-
-    def _make_id(self, url: str) -> str:
-        """Generate a deterministic UUID v5 from a normalized URL."""
-        parts = urlsplit(url.strip())
-        normalized_url = urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
-        return str(uuid.uuid5(_NAMESPACE_UUID, normalized_url))
 
     def _warn_unknown_fields(self, entry_data: Mapping, seen_unknowns: set[str]) -> None:
         """Warn once for newly encountered RSS fields not present in defined schemas."""

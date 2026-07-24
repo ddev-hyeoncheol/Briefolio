@@ -2,7 +2,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from src.core.logger import get_logger
-from src.models.entities.bronze_news import BronzeNewsModel
+from src.models.entities.news import NewsModel
 from src.models.schemas.sources.cnbc import CnbcEntrySchema
 from src.worker.plugins.rss_source import RssSource
 
@@ -37,13 +37,13 @@ class CnbcSource(RssSource):
         """Return known CNBC non-article boilerplates keyed by diagnostic name."""
         return {}
 
-    async def run_fetch(self, executed_at: datetime) -> list[BronzeNewsModel]:
-        """Fetch raw RSS feed and map to BronzeNewsModel entities without enrichment."""
+    async def run_fetch(self, executed_at: datetime) -> list[NewsModel]:
+        """Fetch raw RSS feed and map to NewsModel entities without enrichment."""
 
         raw_feed = await self._fetch_feed()
         entries_data = raw_feed.get("entries") or []
 
-        results: list[BronzeNewsModel] = []
+        results: list[NewsModel] = []
         seen_unknowns: set[str] = set()
 
         for entry_data in entries_data:
@@ -55,8 +55,6 @@ class CnbcSource(RssSource):
             except Exception:
                 continue
 
-            entry_id = self._make_id(entry.link)
-
             published_at = self._parse_published_at(entry=entry)
             if published_at is None:
                 continue
@@ -64,10 +62,8 @@ class CnbcSource(RssSource):
             metadata_payload = entry.model_dump(exclude=self.RSS_ENTRY_STORAGE_FIELDS, mode="json")
 
             results.append(
-                BronzeNewsModel(
+                NewsModel(
                     executed_at=executed_at,
-                    entry_id=entry_id,
-                    news_id=entry_id,
                     source=self.source,
                     title=entry.title,
                     entry_url=entry.link,

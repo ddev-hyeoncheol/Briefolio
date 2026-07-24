@@ -11,7 +11,7 @@
 | 경계 | 프로젝트 명칭 | 프로젝트 ID | 핵심 책임 |
 | :--- | :------------ | :---------- | :-------- |
 | Seed | `Briefolio Seed` | `briefolio-seed` | Terraform state 버킷 등 각 경계 project가 공통으로 의존하는 부트스트랩 인프라 관리 |
-| Ingest | `Briefolio Ingest` | `briefolio-ingest` | 외부 금융 뉴스 수집, 중복 상태 관리, 본문 추출, GCS landing 적재 |
+| Ingest | `Briefolio Ingest` | `briefolio-ingest` | 외부 금융 뉴스 수집, 중복 상태 관리, 본문 추출, GCS raw 적재 |
 | Intelligence | `Briefolio Intelligence` | `briefolio-intelligence` | BigQuery/Dataform 정제, AI 보강, serving용 mart 생성 |
 | Serving | `Briefolio Serving` | `briefolio-serving` | 사용자 API, 검색, 캐시, 조회 저장소 관리 |
 
@@ -24,13 +24,13 @@
 
 현재 구조는 `BatchService.run_pipeline()` 안에서 `BRONZE NEWS → SILVER NEWS → SILVER NEWS_AUGMENTED`가 순차 실행되는 형태이다. 즉 수집, 정제, AI 증강이 하나의 파이프라인 호출 안에 강하게 결합되어 있다.
 
-또한 현재 Bronze 저장은 `BronzeStore.load_bronze_news()`에서 BigQuery `bronze.news`에 직접 JSON load job을 수행하는 방식이다. 장기적으로 Bronze는 BigQuery가 아니라 Cloud Storage 기반 Data Lake로 옮기고, BigQuery는 Silver 이후의 정제·분석·서빙 준비 계층으로 사용하는 방향이 맞다.
+또한 현재 Bronze 저장은 `BronzeStore.load_bronze_news()`에서 BigQuery `bronze.news`에 직접 JSON load job을 수행하는 방식이다. 장기적으로 raw 데이터는 BigQuery가 아니라 Cloud Storage 기반 Data Lake로 옮기고, BigQuery는 Silver 이후의 정제·분석·서빙 준비 계층으로 사용하는 방향이 맞다.
 
 최종 목표 구조는 다음과 같다.
 
 ```text
 Briefolio Ingest (briefolio-ingest)
-  → Cloud Storage Bronze Data Lake
+  → Cloud Storage Raw Data Lake
 
 Briefolio Intelligence (briefolio-intelligence)
   → BigQuery staging (GCS JSONL을 load job으로 적재, External Table 미사용)
@@ -83,27 +83,30 @@ Briefolio Ingest
 
 Ingest의 책임은 외부 뉴스 데이터를 가져와 raw 형태로 안전하게 저장하는 것이다. 수집 로직의 BigQuery 의존성을 완전히 배제하기 위해, 중복 수집 방지(이미 수집된 기사 검사)는 Firestore를 활용하여 수행한다.
 
-Firestore에는 기사 본문이나 메타데이터를 저장하지 않고, 키별 최신 처리 상태(`status: "success" | "failed"`)만 저장한다. 현재 `BronzeStore.lookup_bronze_news()`와 동일하게 두 단계로 조회한다.
+Firestore에는 기사 본문을 저장하지 않고, URL별 최신 처리 상태만 저장한다. 문서 키는 정규화된 URL의 UUID v5(`make_url_id()`)이며, entry URL 키와 canonical URL 키가 같은 컬렉션을 공유한다 (canonical이 entry와 같으면 문서 1개로 수렴).
 
 ```text
-Firestore collections:
-  bronze_entry_status/{entry_id}  → { status, updated_at }  # Enrich 이전 1차 필터
-  bronze_news_status/{news_id}    → { status, updated_at }  # canonical_url 확정 후 2차 필터
+Firestore collection:
+  news_state/{make_url_id(url)} → { status, url, source, executed_at, expires_at[, error_message] }
+    # status: "success" | "failed"
+    # url: 키의 원본 URL (UUID 역참조용)
+    # source + executed_at: 해당 상태를 확정한 실행 → GCS 파티션 역참조 가능
+    # error_message: 실패 문서에만 포함
 ```
 
-필터 조건은 "키 문서가 없거나 최신 status가 `failed`이면 재시도 대상으로 통과"이며, 현행 BigQuery 7일 윈도우 조회의 재시도 정책을 그대로 유지한다.
+조회는 두 단계다: Enrich 이전에 entry URL 키로 1차 필터, Enrich 후 canonical URL로 키가 바뀐 item만 2차 필터. 필터 조건은 "키 문서가 없거나 최신 status가 `failed`이면 재시도 대상으로 통과"이며, 현행 BigQuery 7일 윈도우 조회의 재시도 정책을 그대로 유지한다. `expires_at`은 이 7일 정책을 Firestore TTL로 구현한 필드다.
 
 Ingest가 담당할 작업은 다음이다.
 
 ```text
 - RSS feed fetch
 - source별 entry parsing
-- Firestore 기반 중복 수집 필터링 (entry_id 1차 검사 → Enrich 후 news_id 2차 검사, 각 키의 최신 status만 조회)
+- Firestore 기반 중복 수집 필터링 (entry URL 키 1차 검사 → Enrich 후 키가 바뀐 item만 2차 검사)
 - newspaper4k 기반 HTML enrich (신규 기사에 한함)
-- BronzeNewsModel 생성
+- NewsModel 생성
 - GCS JSONL 저장
-- _SUCCESS.json 또는 manifest.json 저장
-- Firestore에 entry_id/news_id 최신 status 기록 (success 또는 failed)
+- 캡처별 manifest JSON 저장
+- Firestore에 entry/canonical URL 키별 최신 state 문서 기록 (success 또는 failed)
 ```
 
 Ingest가 담당하지 않을 작업은 다음이다.
@@ -119,17 +122,23 @@ Ingest가 담당하지 않을 작업은 다음이다.
 
 ### 3.2 저장 위치
 
-Bronze raw는 Cloud Storage에 JSONL로 저장한다.
+원본 데이터는 Cloud Storage에 JSONL로 저장한다.
 
 추천 경로는 다음과 같다.
 
 ```text
-gs://{bucket}/bronze/news/data/source={source}/dt={YYYY-MM-DD}/hour={HH}/batch_id={batch_id}/part-00000.jsonl
+gs://{bucket}/news/data/executed_at={YYYYMMDDThhmmssZ}/run_id={run_id}/source={source}.jsonl
 
-gs://{bucket}/bronze/news/manifests/source={source}/dt={YYYY-MM-DD}/hour={HH}/batch_id={batch_id}/_SUCCESS.json
+gs://{bucket}/news/manifests/executed_at={YYYYMMDDThhmmssZ}/run_id={run_id}/source={source}.json
 ```
 
-`data`와 `manifests`를 분리하는 이유는 BigQuery load job이 `part-*.jsonl`만 읽도록 하기 위해서다. `_SUCCESS.json`이 같은 wildcard에 섞이면 schema mismatch가 발생할 수 있습니다.
+경로 계층은 포함 관계를 그대로 따른다: 슬롯(`executed_at`)이 호출(`run_id`)들을 담고, 한 호출이 source별 캡처 파일들을 담는다. 날짜/시간 조회는 `executed_at=` 값의 prefix로 수행한다 (일: `executed_at=20260714`, 시간대: `executed_at=20260714T09`). 나열이 시간순으로 정렬되며, source는 row 필드로도 존재하므로 경로 조회 단위로 두지 않는다.
+
+`data`와 `manifests`를 분리하는 이유는 BigQuery load job이 `*.jsonl`만 읽도록 하기 위해서다. 매니페스트가 같은 wildcard에 섞이면 schema mismatch가 발생할 수 있다.
+
+`run_id`는 호출마다 생성하는 UUID다. RSS 재호출은 같은 원본의 재처리가 아니라 새로운 관측이므로, 중복·재시도 호출은 기존 캡처를 덮어쓰지 않고 서로 다른 immutable capture로 축적된다(append-only). 캡처 간 중복 기사는 Firestore dedup이 비용을 줄이고 Silver의 news_id dedup이 최종 제거한다.
+
+item이 0건인 캡처도 매니페스트는 기록해 "빈 캡처"와 "미실행"을 구분할 수 있게 한다. 이때 데이터 파일은 생성하지 않는다.
 
 ### 3.3 Ingest 완료 기준
 
@@ -137,9 +146,9 @@ Ingest는 다음 조건을 만족하면 완료된 것으로 본다.
 
 ```text
 - Firestore 조회를 통해 중복 기사는 스크래핑 단계 진입 전에 필터링됨
-- 10분 단위 batch_id 생성
+- 10분 슬롯 executed_at 정규화 및 호출별 run_id 생성
 - source별 JSONL 파일 생성
-- source별 _SUCCESS.json 생성
+- 캡처별 manifest JSON 생성
 - GCS에 저장된 JSONL을 Python에서 재독해 가능
 - BigQuery에 직접 bronze.news를 쓰지 않음
 - Cloud Run Job 또는 Cloud Run Service에서 독립 실행 가능
@@ -151,12 +160,12 @@ Ingest는 다음 조건을 만족하면 완료된 것으로 본다.
 
 ### 4.1 역할
 
-Intelligence는 Cloud Storage Bronze raw를 BigQuery 분석 계층으로 정제하고 AI로 보강하는 영역이다.
+Intelligence는 Cloud Storage raw 데이터를 BigQuery 분석 계층으로 정제하고 AI로 보강하는 영역이다.
 
 Intelligence가 담당할 작업은 다음이다.
 
 ```text
-- GCS Bronze JSONL을 BigQuery staging table로 적재하는 load job 구성 (External Table 미사용 — BigQuery를 SoT로 유지해 조회 안정성/멱등성 확보)
+- GCS raw JSONL을 BigQuery staging table로 적재하는 load job 구성 (External Table 미사용 — BigQuery를 SoT로 유지해 조회 안정성/멱등성 확보)
 - Dataform 기반 silver.news 생성
 - Overwrite 방식으로 재처리 시 멱등성을 보장하는 쿼리 적용
 - partition / clustering
@@ -169,9 +178,9 @@ Intelligence가 담당할 작업은 다음이다.
 
 ### 4.2 Dataform 도입 방향
 
-Dataform은 `bronze raw → silver.news` 변환의 중심이 된다.
+Dataform은 `GCS raw → silver.news` 변환의 중심이 된다.
 
-Bronze GCS JSONL은 External Table로 선언하지 않고, BigQuery load job으로 native staging table에 복제해 적재한다. External Table은 조회 시점에 GCS 파일 상태에 직접 의존해 스키마 불일치나 일시적 조회 실패에 노출되므로, BigQuery를 Silver 이후 계층의 SoT로 유지하고 쿼리 안정성과 멱등성을 확보하려는 목적에는 맞지 않는다.
+GCS raw JSONL은 External Table로 선언하지 않고, BigQuery load job으로 native staging table에 복제해 적재한다. External Table은 조회 시점에 GCS 파일 상태에 직접 의존해 스키마 불일치나 일시적 조회 실패에 노출되므로, BigQuery를 Silver 이후 계층의 SoT로 유지하고 쿼리 안정성과 멱등성을 확보하려는 목적에는 맞지 않는다.
 
 ```text
 GCS JSONL
@@ -179,13 +188,17 @@ GCS JSONL
   → Dataform incremental table: silver.news (Overwrite 기반 멱등성 쿼리)
 ```
 
-staging load job은 재실행해도 동일 결과가 나오도록 batch_id 단위로 truncate 후 재적재하거나 `batch_id` 기준 MERGE로 멱등성을 보장한다.
+적재 트리거는 Eventarc로 `news/data/**` 객체 생성 이벤트만 구독한다. `news/manifests/**`는 구독 대상이 아니다 — 캡처 파일이 source당 통짜 1개(멀티파트 아님)라 객체 생성 자체가 이미 완결 신호이고, manifest는 0건 실행을 남기기 위한 운영자용 기록일 뿐 적재 로직이 기다릴 대상이 아니다.
+
+Eventarc는 at-least-once 전달이라 같은 이벤트가 중복 도착할 수 있다. load job의 `jobId`를 객체 경로에서 유도한 결정적 값(`run_id`+`source`, 예: `load_{run_id}_{source}`)으로 지정해 멱등성을 확보한다. `run_id`는 한 호출의 모든 source가 공유하므로 `source`를 반드시 함께 포함해야 한다. 이미 존재하는 jobId 재제출은 BigQuery가 거부하며, 핸들러는 이 거부를 실패가 아닌 정상 완료로 처리한다.
+
+Eventarc는 트리거 생성 이전 객체나 재시도 보존 기간을 넘긴 장애를 커버하지 못하므로, 같은 load 로직을 `executed_at=` prefix 목록 조회로 재실행하는 백필/재조정 절차를 별도로 둔다. jobId가 결정적이라 이미 적재된 구간과 겹쳐 실행해도 안전하며(중복은 스킵), 주기적(예: 매일 최근 24시간 재스캔) 실행을 권장한다.
 
 ### 4.3 silver.news 설계
 
 `silver.news`는 정제된 뉴스 원문 테이블이다.
 
-주요 필드는 현재 모델을 유지한다.
+주요 필드는 현재 모델을 유지한다. `news_id`는 Ingest가 URL(canonical 우선) 기반 UUID v5로 유도해 raw JSONL에 포함한다.
 
 ```text
 executed_at
@@ -243,7 +256,8 @@ QUALIFY ROW_NUMBER() OVER (
 Intelligence는 다음 조건을 만족하면 완료된 것으로 본다.
 
 ```text
-- GCS Bronze JSONL이 BigQuery staging table로 적재됨
+- GCS raw JSONL이 Eventarc 트리거로 BigQuery staging table에 적재됨 (jobId 기반 멱등성 포함)
+- 같은 load 로직 기반의 백필/재조정 절차가 구성됨
 - Dataform으로 silver.news 생성 가능
 - silver.news가 partitioned / clustered table로 생성됨
 - news_id 중복 제거 및 Overwrite 기반의 멱등성 적재 가능
@@ -440,7 +454,7 @@ terraform/
   serving/       # briefolio-serving state root
 ```
 
-각 root(`ingest/`, `intelligence/`, `serving/`)는 `main.tf`(backend), `provider.tf`, `variables.tf`로 구성되고, `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`terraform/state/{경계}`).
+각 root(`ingest/`, `intelligence/`, `serving/`)는 `main.tf`(backend)와 `provider.tf`로 구성되고, `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`{경계}`).
 
 `seed/` root는 아직 없다. `briefolio-seed` project와 상태 버킷(`briefolio-tfstate`)은 `bootstrap.sh`로 생성했고, 현재 Terraform으로 관리할 추가 리소스가 없기 때문이다. 공유 CI/CD 같은 리소스가 필요해지면 그때 `terraform/seed/`를 추가한다.
 
@@ -465,7 +479,7 @@ project_id: briefolio-ingest
   - Cloud Scheduler
   - source secrets
   - Firestore ingestion state
-  - GCS landing data
+  - GCS raw data
 
 Briefolio Intelligence
 project_id: briefolio-intelligence
@@ -473,7 +487,7 @@ project_id: briefolio-intelligence
   - Dataform
   - Vertex AI remote model 연결
   - Cloud Run AI augmentation fallback
-  - GCS landing read IAM
+  - GCS raw data read IAM
 
 Briefolio Serving
 project_id: briefolio-serving
@@ -495,11 +509,11 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 작업:
 
 ```text
-- BronzeNewsModel schema 확정
+- NewsModel schema 확정
 - SilverNewsModel schema 확정
 - SilverNewsAugmentedModel schema 확정
 - GCS JSONL schema version 정의
-- batch_id 규칙 정의
+- run_id 규칙 정의
 - Firestore 수집 중복 여부 인덱스 스키마 정의
 ```
 
@@ -508,14 +522,14 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 ```text
 - schema_version 명시
 - GCS path convention 문서화
-- Firestore status 스키마(entry_id/news_id 키, status 필드) 문서화
+- Firestore state 스키마(news_state 단일 컬렉션, URL 키) 문서화
 ```
 
 ---
 
 ### Phase 1. Ingest 분리
 
-목표는 Bronze 수집을 BigQuery에서 Cloud Storage로 옮기는 것이다.
+목표는 raw 수집을 BigQuery에서 Cloud Storage로 옮기는 것이다.
 
 작업:
 
@@ -523,12 +537,11 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 - src/worker/ → src/ingest/, src/api/ → src/serving/ 디렉토리 리네이밍
 - src/core/dependencies.py에서 service별 provider 의존성을 ingest/serving 각자의 dependencies.py로 분리
 - CloudStorageProvider 추가
-- BronzeLakeStore 추가
 - FirestoreProvider 및 중복 필터 로직 추가
 - requirements.txt에 google-cloud-storage, google-cloud-firestore 추가
 - GCS bucket 및 Firestore 설정 추가
-- Bronze load를 BigQuery에서 GCS JSONL로 변경
-- /batch/bronze/news 독립 실행 검증
+- load를 BigQuery에서 GCS JSONL로 변경
+- /ingest/run 독립 실행 검증
 ```
 
 완료 기준:
@@ -699,7 +712,7 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 가장 먼저 해야 할 순서는 다음이다.
 
 ```text
-1. GCS Bronze Data Lake 전환 및 Firestore 중복 체크 연동
+1. GCS Raw Data Lake 전환 및 Firestore 중복 체크 연동
 2. Dataform으로 silver.news 생성 (Overwrite 멱등성 쿼리)
 3. AI augmentation SQL 네이티브(Vertex AI remote model) 검증
 4. (검증 실패 시에만) Cloud Run 기반 AI augmentation 독립 실행 및 provider abstraction
@@ -708,7 +721,7 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 7. GCP project/state 분리
 ```
 
-즉 지금 당장 해야 할 핵심은 **Ingest 분리와 Bronze 저장소 전환 및 중복 제거 분리**이다.
+즉 지금 당장 해야 할 핵심은 **Ingest 분리와 raw 저장소 전환 및 중복 제거 분리**이다.
 Serving이나 GCP project 분리는 나중에 해도 된다.
 
 다만 Terraform root/state 분리와 Seed/Ingest project 생성은, 1번(GCS/Firestore 연동)을 실제 GCP 리소스 위에서 구현하기 위한 선행 준비로 먼저 진행했다.
@@ -723,7 +736,7 @@ Serving이나 GCP project 분리는 나중에 해도 된다.
 [Briefolio Ingest]
 Cloud Scheduler
   → Cloud Run Ingest (Firestore로 중복 체크)
-  → GCS Bronze JSONL
+  → GCS Raw JSONL
 
 [Briefolio Intelligence]
 Dataform
@@ -742,10 +755,10 @@ Export Job
 이 구조의 핵심은 다음이다.
 
 ```text
-- Bronze는 Data Lake이며, BigQuery에는 External Table이 아닌 load job으로 복제해 SoT와 조회 안정성을 유지
-- Ingest 중복 관리는 Firestore를 활용해 BigQuery 완전 분리 (Firestore에는 entry_id/news_id별 최신 status만 저장)
+- Ingest의 결과물은 Data Lake이며, BigQuery에는 External Table이 아닌 load job으로 복제해 SoT와 조회 안정성을 유지
+- Ingest 중복 관리는 Firestore를 활용해 BigQuery 완전 분리 (Firestore에는 URL 키별 최신 state만 저장)
 - Silver는 BigQuery 정제 계층
-- Augmented는 기본적으로 Intelligence Dataform SQL 안에서 Vertex AI remote model로 생성하며, SQL 네이티브가 불가능하면 같은 프로젝트의 Cloud Run fallback을 사용 (repeated/RECORD 필드는 이 경로에서만 생성되며 GCS/Bronze 적재와 무관)
+- Augmented는 기본적으로 Intelligence Dataform SQL 안에서 Vertex AI remote model로 생성하며, SQL 네이티브가 불가능하면 같은 프로젝트의 Cloud Run fallback을 사용 (repeated/RECORD 필드는 이 경로에서만 생성되며 GCS 적재와 무관)
 - Mart는 serving 준비 계층
 - Serving은 별도 low-latency 조회 계층
 ```
@@ -805,7 +818,7 @@ src/
       firestore.py
     models/
       entities/
-        bronze_news.py
+        news.py
       schemas/
 
   serving/             # 기존 api/ 대체

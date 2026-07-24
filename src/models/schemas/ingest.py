@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import AwareDatetime, BaseModel, Field
 
 IngestStatus = Literal["success", "partial", "failed"]
-IngestPhase = Literal["fetch", "entry_lookup", "enrich", "news_lookup", "load"]
+IngestPhase = Literal["fetch", "entry_lookup", "enrich", "news_lookup", "load", "state_write"]
 
 
 class IngestRequest(BaseModel):
@@ -59,6 +59,9 @@ class IngestResponse(BaseModel):
 
     executed_at: AwareDatetime = Field(
         description="Normalized ingest execution time (UTC).",
+    )
+    run_id: str = Field(
+        description="Unique identifier of this invocation, used as the capture path segment.",
     )
     status: IngestStatus = Field(
         description="Overall status of this ingest execution.",

@@ -2,6 +2,7 @@ import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from google.cloud import firestore, storage
 
 from src.config.config import settings
 from src.core.logger import configure_uvicorn_loggers, get_logger
@@ -18,6 +19,8 @@ async def lifespan(app: FastAPI):
     # Initialize shared resources on startup.
     # All semaphores are created here to ensure they are bound to the correct event loop.
     app.state.source_semaphore = asyncio.Semaphore(10)
+    app.state.firestore_client = firestore.AsyncClient()
+    app.state.storage_client = storage.Client()
 
     logger.info("App startup completed | app: worker")
     yield
