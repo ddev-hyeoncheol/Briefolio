@@ -1,31 +1,27 @@
 # Data Contract Rules
 
-Entity, Schema DTO, BigQuery Terraform schema, field description 계약을 정의합니다.
+Entity, Schema DTO, Firestore 문서, field description 계약을 정의합니다.
 
 ## Models And Schemas
 
-- Entity는 BigQuery에 저장되는 record shape를 정의합니다.
-- Entity는 BigQuery에서 돌아오는 `loaded_at` 같은 extra field를 무시하되, 저장 모델 필드로 선언하지 않습니다.
-- Schema DTO는 API 요청/응답, pipeline phase 결과, provider response 계약을 정의합니다.
-- 요청 DTO는 사용자가 제공하는 최소 입력만 가지며 물리 table id를 받지 않습니다.
-- `layer`와 `target`은 enum 또는 registry로 유효 조합을 제한하고 Terraform schema에 반영하지 않습니다.
+- Entity(`NewsModel`)는 GCS raw JSONL에 저장되는 record shape를 정의합니다.
+- Entity 파생 키는 저장 여부로 구분합니다. `news_id`는 computed field로 직렬화하고, `entry_key`는 plain property로 직렬화에서 제외합니다.
+- Entity 필드 추가, 삭제, 이름 변경은 raw JSONL 계약 변경이므로 Intelligence 소비 계획(TRANSITION.md 4장)과 충돌 여부를 확인합니다.
+- Schema DTO는 API 요청/응답, pipeline phase 결과, source enrichment 결과 계약을 정의합니다.
+- 요청 DTO는 사용자가 제공하는 최소 입력만 가지며 물리 리소스 식별자를 받지 않습니다.
 - `status`, `failed_phase`, phase 값은 `Literal` 또는 enum으로 제한합니다.
 - count 필드는 pipeline 규칙의 실제 의미와 description을 일치시킵니다.
-- Pipeline 응답 전용 필드인 count, failed_phase는 Terraform에 반영하지 않습니다.
-- status, error_message는 BigQuery Entity 저장 필드로 선언된 경우에만 Terraform에 반영합니다.
-- LLM DTO는 provider 응답 검증 계약이며, BigQuery에는 `SilverNewsAugmentedModel`로 변환된 필드만 저장합니다.
+- Pipeline 응답 전용 필드(count, failed_phase 등)는 저장 계약에 반영하지 않습니다.
 
-## BigQuery And Terraform
+## Firestore Documents
 
-- Entity 필드 추가, 삭제, 이름 변경, 타입 변경, nullable 변경은 Terraform BigQuery schema와 같은 변경 단위에서 검토합니다.
-- **[CRITICAL]** BigQuery column 삭제, rename, REQUIRED 전환처럼 기존 데이터 손실이나 적재 실패 위험이 있는 schema 변경은 사용자에게 명시 확인을 받습니다.
-- Terraform `loaded_at` column은 Entity에 두지 않고, `BigQueryProvider.execute_load_json()`에서 주입합니다.
+- `news_state` 문서 키는 `make_url_id()`가 유도한 URL UUID만 사용합니다.
+- 문서는 `{status, url, source, executed_at, expires_at[, error_message]}` 전체 덮어쓰기로 기록하며 merge를 사용하지 않습니다.
+- `expires_at`은 Provider가 기록 시각 + 7일로 주입하는 TTL 필드입니다.
+- 소비자 없는 필드는 문서에 추가하지 않습니다.
+- **[CRITICAL]** `make_url_id()`의 namespace와 정규화 규칙 변경은 기존 dedup 기록 전체를 무효화해 중복 적재를 유발하므로 사용자에게 명시 확인을 받습니다.
 
 ## Field Descriptions
 
-- Entity `Field(description=...)`과 Terraform BigQuery column description은 같은 저장 필드에서 동일하게 유지합니다.
-- Bronze/Silver description은 계층별 의미가 다르면 다르게 작성할 수 있습니다.
-- `raw_` 필드는 원천 데이터, `ai_` 필드는 LLM 생성, 분류, 정규화 값을 드러냅니다.
-- DTO description은 API 입력과 pipeline 실행 결과 계약을 설명하며 BigQuery description과 억지로 맞추지 않습니다.
-- Terraform description은 DB 사용자와 분석가가 보는 데이터 의미를 설명합니다.
-- `loaded_at`은 application-injected load timestamp로 설명합니다.
+- Entity `Field(description=...)`은 raw 데이터의 출처(RSS 제공, HTML 추출)를 드러냅니다.
+- DTO description은 API 입력과 pipeline 실행 결과 계약을 설명합니다.

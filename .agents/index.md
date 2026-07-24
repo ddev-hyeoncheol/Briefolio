@@ -45,15 +45,15 @@
 
 ## Domain Rules
 
-아키텍처, 레이어 책임, target, Provider 변경이면 다음 파일을 읽습니다.
+아키텍처, 레이어 책임, API, Provider 변경이면 다음 파일을 읽습니다.
 
 - `.agents/rules/architecture.md`
 
-Batch pipeline, bronze/silver, count, 실패 전파 변경이면 다음 파일을 읽습니다.
+Ingest pipeline, dedup, count, 실패 전파 변경이면 다음 파일을 읽습니다.
 
 - `.agents/rules/pipeline.md`
 
-Entity, Schema, BigQuery, Terraform, field description 변경이면 다음 파일을 읽습니다.
+Entity, Schema, Firestore 문서, Terraform, field description 변경이면 다음 파일을 읽습니다.
 
 - `.agents/rules/data-contract.md`
 

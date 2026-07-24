@@ -10,7 +10,7 @@
 2. Schema
 3. Core / Config
 4. Provider
-5. Source / Store / AI Plugin
+5. Source
 6. Service
 7. Router / Entry
 8. Infra / Docs
