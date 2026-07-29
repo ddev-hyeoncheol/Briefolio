@@ -13,9 +13,9 @@ Angular 원문과의 차이:
 | Header  | `<type>(<scope>): <short summary>`                                      | `[Type] Subject`                                                                                      |
 | Type    | 소문자 `build`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `test` | 대괄호와 PascalCase: `[Build]`, `[CI]`, `[Docs]`, `[Feat]`, `[Fix]`, `[Perf]`, `[Refactor]`, `[Test]` |
 | Scope   | 선택 사항                                                               | 사용하지 않음                                                                                         |
-| Subject | 현재형, 소문자 시작, 마침표 없음                                        | 한글로 간결하게 작성                                                                                  |
+| Subject | 명령형 현재시제, 소문자 시작, 마침표 없음                               | 한글로 간결하게 작성                                                                                  |
 | Body    | Angular는 `docs` 외에는 body를 요구                                     | 선택 사항이지만, 있으면 변경 이유와 영향을 설명                                                       |
-| Footer  | breaking change, deprecation, issue reference                           | 필요할 때만 issue reference 또는 breaking change 설명                                                 |
+| Footer  | breaking change, deprecation, issue reference                           | 필요할 때만 issue reference, breaking change, deprecation 설명                                        |
 
 즉, 이 저장소의 규칙은 Angular와 **타입 의미와 작성 의도는 비슷하지만 header 형식은 다릅니다.**
 
@@ -65,21 +65,20 @@ Header만으로 충분한 작은 변경은 한 줄 commit도 허용합니다.
 ## Examples
 
 ```text
-[Feat] Silver 뉴스 증강 batch 추가
+[Feat] RSS 소스별 GCS 캡처 적재 추가
 
-- `silver/news-augmented` batch target 추가
-- `POST /batch/{layer}/{target}` 경로에서 Silver 증강 실행 지원
-- `silver.news`를 Gemini로 분석해 `silver.news_augmented`에 적재
-- AI chunk 실패 시 실패 record 유지
+- source별 `NewsModel`을 JSONL로 직렬화해 GCS에 append-only로 적재
+- 캡처마다 manifest JSON을 기록해 빈 실행과 미실행을 구분
+- Firestore dedup을 통과한 기사만 enrich 후 적재
 
 Closes #123
 ```
 
 ```text
-[Fix] 스크래핑 실패 기사 적재 누락 수정
+[Fix] 본문 추출 실패 기사 적재 누락 수정
 
-- 본문 추출 실패 기사도 `enriched_items`에 유지
-- 실패 항목의 `status_code`와 오류 메타데이터 적재
+- HTML enrich에 실패한 기사도 `NewsModel`로 유지해 적재
+- 실패 항목의 `status_code`와 오류 메타데이터 기록
 ```
 
 ```text
@@ -87,14 +86,14 @@ Closes #123
 ```
 
 ```text
-[Refactor] batch 실행 target 경로 정리
+[Feat] batch API를 단일 ingest 엔드포인트로 통합
 
-- 요청 body에서 `target_table` 제거
-- `POST /batch/{layer}/{target}` path target으로 실행 대상 전달
+- layer/target별 경로를 `POST /ingest/run` 하나로 통합
+- 실행 대상은 `ENABLED_SOURCE_CLASSES` 설정으로 결정
 
-BREAKING CHANGE: batch 실행 요청은 더 이상 `target_table`을 받지 않습니다.
+BREAKING CHANGE: 기존 `POST /batch/{layer}/{target}` 경로는 제거됩니다.
 
-기존 클라이언트는 실행 대상을 `POST /batch/{layer}/{target}` path로 전달해야 합니다.
+호출자는 `POST /ingest/run`으로 전환해야 합니다.
 ```
 
 ## Branches And Pull Requests
