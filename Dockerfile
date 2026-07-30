@@ -14,4 +14,4 @@ RUN adduser --disabled-password --gecos "" appuser \
 USER appuser
 
 EXPOSE 8080
-CMD ["python", "-m", "src.api.main"]
+CMD ["python", "-m", "src.ingest.main"]
