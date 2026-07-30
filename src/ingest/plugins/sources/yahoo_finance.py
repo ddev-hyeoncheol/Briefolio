@@ -1,15 +1,11 @@
-from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from src.core.logger import get_logger
-from src.models.entities.news import NewsModel
-from src.models.schemas.sources.yahoo_finance import YahooFinanceEntrySchema
-from src.worker.plugins.rss_source import RssSource
-
-logger = get_logger(__name__)
+from src.ingest.models.news import NewsModel
+from src.ingest.models.sources.yahoo_finance import YahooFinanceEntrySchema
+from src.ingest.plugins.rss import RssPlugin
 
 
-class YahooFinanceSource(RssSource):
+class YahooFinanceSource(RssPlugin):
     """News source for Yahoo Finance RSS feed with source-specific boilerplate support."""
 
     @property
@@ -17,23 +13,23 @@ class YahooFinanceSource(RssSource):
         return "yahoo_finance"
 
     @property
-    def RSS_URL(self) -> str:
+    def rss_url(self) -> str:
         return "https://finance.yahoo.com/rss/"
 
     @property
-    def RSS_ENTRY_STORAGE_FIELDS(self) -> set[str]:
+    def rss_entry_storage_fields(self) -> set[str]:
         return {"title", "link", "published_parsed", "media_content"}
 
     @property
-    def RSS_ENTRY_METADATA_FIELDS(self) -> set[str]:
+    def rss_entry_metadata_fields(self) -> set[str]:
         return {"source", "id"}
 
     @property
-    def RSS_ENTRY_IGNORED_FIELDS(self) -> set[str]:
+    def rss_entry_ignored_fields(self) -> set[str]:
         return {"title_detail", "links", "published", "guidislink", "media_credit", "credit"}
 
     @property
-    def BOILERPLATE_CONTENTS(self) -> dict[str, str]:
+    def boilerplate_contents(self) -> dict[str, str]:
         """Return known Yahoo Finance non-article boilerplates keyed by diagnostic name."""
         return {
             "yahoo_login": "Sign in to access your portfolio\n\nSign in",
@@ -53,13 +49,9 @@ class YahooFinanceSource(RssSource):
         entries_data = raw_feed.get("entries") or []
 
         results: list[NewsModel] = []
-        seen_unknowns: set[str] = set()
 
         for entry_data in entries_data:
             try:
-                if isinstance(entry_data, Mapping):
-                    self._warn_unknown_fields(entry_data=entry_data, seen_unknowns=seen_unknowns)
-
                 entry = YahooFinanceEntrySchema.model_validate(entry_data)
             except Exception:
                 continue
@@ -74,7 +66,7 @@ class YahooFinanceSource(RssSource):
                 if first_media.url:
                     thumbnail_url = first_media.url
 
-            metadata_payload = entry.model_dump(exclude=self.RSS_ENTRY_STORAGE_FIELDS, mode="json")
+            metadata_payload = entry.model_dump(exclude=self.rss_entry_storage_fields, mode="json")
 
             results.append(
                 NewsModel(
@@ -88,16 +80,6 @@ class YahooFinanceSource(RssSource):
                 )
             )
 
-        success_count = len(results)
-        total_count = len(entries_data)
-
-        logger.info(
-            "RssSource fetch completed | source: %s, count: %d, total_count: %d, skipped_count: %d",
-            self.source,
-            success_count,
-            total_count,
-            total_count - success_count,
-        )
         return results
 
     def _parse_published_at(self, entry: YahooFinanceEntrySchema) -> datetime | None:

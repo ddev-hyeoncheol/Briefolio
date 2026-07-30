@@ -1,10 +1,8 @@
 from fastapi import APIRouter, Depends, Response, status
 
-from src.core.logger import get_logger
-from src.models.schemas.ingest import IngestRequest, IngestResponse
-from src.worker.services.ingest import IngestService, get_ingest_service
-
-logger = get_logger(__name__)
+from src.ingest.dependencies import get_ingest_service
+from src.ingest.models.ingest import IngestRequest, IngestResponse
+from src.ingest.service import IngestService
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -25,8 +23,6 @@ async def run_ingest(
     ingest_service: IngestService = Depends(get_ingest_service),
 ) -> IngestResponse:
     """Run the news ingestion batch."""
-    logger.info("IngestRouter ingest started | endpoint: ingest/run")
-
     result = await ingest_service.run(executed_at=request.executed_at)
 
     # Map execution status to the HTTP status code.
@@ -37,5 +33,4 @@ async def run_ingest(
     else:
         response.status_code = status.HTTP_200_OK
 
-    logger.info("IngestRouter ingest completed | endpoint: ingest/run, status: %s", result.status)
     return result

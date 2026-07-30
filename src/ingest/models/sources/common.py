@@ -1,7 +1,7 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class SourceEnrichedArticleSchema(BaseModel):
+class ArticleEnrichmentSchema(BaseModel):
     """
     Unified schema for raw article content enrichment results.
 

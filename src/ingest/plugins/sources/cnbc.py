@@ -1,15 +1,11 @@
-from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from src.core.logger import get_logger
-from src.models.entities.news import NewsModel
-from src.models.schemas.sources.cnbc import CnbcEntrySchema
-from src.worker.plugins.rss_source import RssSource
-
-logger = get_logger(__name__)
+from src.ingest.models.news import NewsModel
+from src.ingest.models.sources.cnbc import CnbcEntrySchema
+from src.ingest.plugins.rss import RssPlugin
 
 
-class CnbcSource(RssSource):
+class CnbcSource(RssPlugin):
     """News source for CNBC RSS feed with source-specific boilerplate support."""
 
     @property
@@ -17,23 +13,23 @@ class CnbcSource(RssSource):
         return "cnbc"
 
     @property
-    def RSS_URL(self) -> str:
+    def rss_url(self) -> str:
         return "https://search.cnbc.com/rs/search/combinedcms/view.xml" "?partnerId=wrss01&id=15839069"
 
     @property
-    def RSS_ENTRY_STORAGE_FIELDS(self) -> set[str]:
+    def rss_entry_storage_fields(self) -> set[str]:
         return {"link", "title", "published_parsed"}
 
     @property
-    def RSS_ENTRY_METADATA_FIELDS(self) -> set[str]:
+    def rss_entry_metadata_fields(self) -> set[str]:
         return {"id", "metadata_type", "metadata_sponsored", "summary"}
 
     @property
-    def RSS_ENTRY_IGNORED_FIELDS(self) -> set[str]:
+    def rss_entry_ignored_fields(self) -> set[str]:
         return {"links", "guidislink", "metadata_id", "title_detail", "summary_detail", "published"}
 
     @property
-    def BOILERPLATE_CONTENTS(self) -> dict[str, str]:
+    def boilerplate_contents(self) -> dict[str, str]:
         """Return known CNBC non-article boilerplates keyed by diagnostic name."""
         return {}
 
@@ -44,13 +40,9 @@ class CnbcSource(RssSource):
         entries_data = raw_feed.get("entries") or []
 
         results: list[NewsModel] = []
-        seen_unknowns: set[str] = set()
 
         for entry_data in entries_data:
             try:
-                if isinstance(entry_data, Mapping):
-                    self._warn_unknown_fields(entry_data=entry_data, seen_unknowns=seen_unknowns)
-
                 entry = CnbcEntrySchema.model_validate(entry_data)
             except Exception:
                 continue
@@ -59,7 +51,7 @@ class CnbcSource(RssSource):
             if published_at is None:
                 continue
 
-            metadata_payload = entry.model_dump(exclude=self.RSS_ENTRY_STORAGE_FIELDS, mode="json")
+            metadata_payload = entry.model_dump(exclude=self.rss_entry_storage_fields, mode="json")
 
             results.append(
                 NewsModel(
@@ -72,16 +64,6 @@ class CnbcSource(RssSource):
                 )
             )
 
-        success_count = len(results)
-        total_count = len(entries_data)
-
-        logger.info(
-            "RssSource fetch completed | source: %s, count: %d, total_count: %d, skipped_count: %d",
-            self.source,
-            success_count,
-            total_count,
-            total_count - success_count,
-        )
         return results
 
     def _parse_published_at(self, entry: CnbcEntrySchema) -> datetime | None:

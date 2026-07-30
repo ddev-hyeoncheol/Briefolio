@@ -5,23 +5,11 @@ from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import Depends
-from google.cloud import firestore, storage
-
-from src.config.config import settings
-from src.core.dependencies import get_firestore_client, get_source_semaphore, get_storage_client
-from src.core.logger import get_logger
-from src.models.entities.news import NewsModel
-from src.models.schemas.ingest import IngestPhase, IngestResponse, IngestSourceResult
-from src.worker.plugins.rss_source import RssSource
-from src.worker.plugins.sources.yahoo_finance import YahooFinanceSource
-from src.worker.providers.firestore import FirestoreProvider
-from src.worker.providers.storage import CloudStorageProvider
-
-logger = get_logger(__name__)
-
-# Registry of enabled news source classes. Add a source class here to activate it.
-ENABLED_SOURCE_CLASSES: tuple[type[RssSource], ...] = (YahooFinanceSource,)
+from src.ingest.models.ingest import IngestPhase, IngestResponse, IngestSourceResult
+from src.ingest.models.news import NewsModel
+from src.ingest.plugins.rss import RssPlugin
+from src.ingest.providers.firestore import FirestoreProvider
+from src.ingest.providers.storage import CloudStorageProvider
 
 # Firestore collection holding per-URL dedup state documents (TRANSITION.md 3.1).
 NEWS_STATE_COLLECTION = "news_state"
@@ -32,7 +20,7 @@ class IngestService:
 
     def __init__(
         self,
-        source_plugins: Sequence[RssSource],
+        source_plugins: Sequence[RssPlugin],
         firestore_provider: FirestoreProvider,
         storage_provider: CloudStorageProvider,
     ) -> None:
@@ -48,7 +36,6 @@ class IngestService:
         # replayed invocations never overwrite an earlier capture's files.
         run_id = str(uuid.uuid4())
         started_at = datetime.now(tz=timezone.utc)
-        logger.info("IngestService ingest started | executed_at: %s, run_id: %s", executed_at.isoformat(), run_id)
 
         source_results = await asyncio.gather(
             *[
@@ -68,13 +55,6 @@ class IngestService:
 
         completed_at = datetime.now(tz=timezone.utc)
         elapsed_seconds = (completed_at - started_at).total_seconds()
-        logger.info(
-            "IngestService ingest completed | executed_at: %s, status: %s, count: %d, elapsed: %.2fs",
-            executed_at.isoformat(),
-            overall_status,
-            count,
-            elapsed_seconds,
-        )
 
         return IngestResponse(
             executed_at=executed_at,
@@ -87,16 +67,11 @@ class IngestService:
             details=source_results,
         )
 
-    async def _run_source(self, source_plugin: RssSource, executed_at: datetime, run_id: str) -> IngestSourceResult:
+    async def _run_source(self, source_plugin: RssPlugin, executed_at: datetime, run_id: str) -> IngestSourceResult:
         """Process a single source pipeline from RSS fetch to raw bucket load."""
         source = source_plugin.source
         started_at = datetime.now(tz=timezone.utc)
         current_phase: IngestPhase = "fetch"
-        logger.info(
-            "IngestService source started | executed_at: %s, source: %s",
-            executed_at.isoformat(),
-            source,
-        )
 
         try:
             # 1. Fetch
@@ -105,34 +80,41 @@ class IngestService:
 
             # 2. Entry lookup (news_id equals entry_key before enrich)
             current_phase = "entry_lookup"
-            lookup_items = await self._filter_retryable(items=fetch_items, key="entry_key")
+            entry_retryable_items = await self._filter_retryable(items=fetch_items, key="entry_key")
 
             # 3. Enrich
             current_phase = "enrich"
-            enriched_items = await source_plugin.run_enrich(items=lookup_items)
+            enriched_items = await source_plugin.run_enrich(items=entry_retryable_items)
+            deduplicated_items, grouped_items = self._deduplicate_enriched_items(items=enriched_items)
 
             # 4. News lookup: only items whose canonical URL moved the key need a fresh check.
             current_phase = "news_lookup"
-            changed_items = [item for item in enriched_items if item.news_id != item.entry_key]
-            retryable_items = await self._filter_retryable(items=changed_items, key="news_id")
+            rekeyed_items = [item for item in deduplicated_items if item.news_id != item.entry_key]
+            news_retryable_items = await self._filter_retryable(items=rekeyed_items, key="news_id")
 
             # Items dropped here are duplicates of an already-successful article, so their
-            # entry URL is resolved immediately, without waiting for a load attempt.
-            duplicate_keys = {item.news_id for item in changed_items} - {item.news_id for item in retryable_items}
-            duplicate_items = [item for item in enriched_items if item.news_id in duplicate_keys]
-            final_items = [item for item in enriched_items if item.news_id not in duplicate_keys]
+            # entry URLs are resolved immediately, without waiting for a load attempt.
+            duplicate_keys = {item.news_id for item in rekeyed_items} - {
+                item.news_id for item in news_retryable_items
+            }
+            duplicate_items = [item for item in deduplicated_items if item.news_id in duplicate_keys]
+            final_items = [item for item in deduplicated_items if item.news_id not in duplicate_keys]
 
             # Detect item-level enrich failures among the items this run will load.
             has_enrich_failure = any(item.status != "success" for item in final_items)
             if duplicate_items:
+                duplicate_states: dict[str, dict] = {}
+                for item in duplicate_items:
+                    for grouped_item in grouped_items[item.news_id]:
+                        duplicate_states[grouped_item.entry_key] = self._create_state_doc(
+                            item=grouped_item,
+                            url=grouped_item.entry_url,
+                            executed_at=executed_at,
+                            status="success",
+                        )
                 await self.firestore_provider.set_states(
                     collection=NEWS_STATE_COLLECTION,
-                    states={
-                        item.entry_key: self._create_state_doc(
-                            item=item, url=item.entry_url, executed_at=executed_at, status="success"
-                        )
-                        for item in duplicate_items
-                    },
+                    states=duplicate_states,
                 )
 
             # 5. Load
@@ -150,23 +132,19 @@ class IngestService:
                     states[item.news_id] = self._create_state_doc(
                         item=item, url=item.canonical_url or item.entry_url, executed_at=executed_at, status=item.status
                     )
-                    if item.entry_key != item.news_id:
-                        states[item.entry_key] = self._create_state_doc(
-                            item=item, url=item.entry_url, executed_at=executed_at, status=item.status
-                        )
+                    for grouped_item in grouped_items[item.news_id]:
+                        if grouped_item.entry_key != item.news_id:
+                            states[grouped_item.entry_key] = self._create_state_doc(
+                                item=grouped_item,
+                                url=grouped_item.entry_url,
+                                executed_at=executed_at,
+                                status=item.status,
+                            )
                 await self.firestore_provider.set_states(collection=NEWS_STATE_COLLECTION, states=states)
 
             status = "partial" if has_enrich_failure else "success"
             completed_at = datetime.now(tz=timezone.utc)
             elapsed_seconds = (completed_at - started_at).total_seconds()
-            logger.info(
-                "IngestService source completed | executed_at: %s, source: %s, status: %s, count: %d, elapsed: %.2fs",
-                executed_at.isoformat(),
-                source,
-                status,
-                len(final_items),
-                elapsed_seconds,
-            )
 
             return IngestSourceResult(
                 source=source,
@@ -180,14 +158,6 @@ class IngestService:
         except Exception as e:
             completed_at = datetime.now(tz=timezone.utc)
             elapsed_seconds = (completed_at - started_at).total_seconds()
-            logger.exception(
-                "IngestService source failed | executed_at: %s, source: %s, failed_phase: %s, elapsed: %.2fs, error: %s",
-                executed_at.isoformat(),
-                source,
-                current_phase,
-                elapsed_seconds,
-                str(e),
-            )
             return IngestSourceResult(
                 source=source,
                 executed_at=executed_at,
@@ -248,13 +218,23 @@ class IngestService:
         statuses = await self.firestore_provider.get_statuses(collection=NEWS_STATE_COLLECTION, doc_ids=doc_ids)
         retryable_items = [item for item in items if statuses.get(getattr(item, key)) != "success"]
 
-        logger.info(
-            "IngestService filter_retryable completed | lookup_key: %s, count: %d, retryable_count: %d",
-            key,
-            len(items),
-            len(retryable_items),
-        )
         return retryable_items
+
+    def _deduplicate_enriched_items(
+        self,
+        items: Sequence[NewsModel],
+    ) -> tuple[list[NewsModel], dict[str, list[NewsModel]]]:
+        """Select one item per news_id while retaining every grouped entry URL."""
+        selected_items: dict[str, NewsModel] = {}
+        grouped_items: dict[str, list[NewsModel]] = {}
+
+        for item in items:
+            grouped_items.setdefault(item.news_id, []).append(item)
+            selected_item = selected_items.get(item.news_id)
+            if selected_item is None or (selected_item.status != "success" and item.status == "success"):
+                selected_items[item.news_id] = item
+
+        return list(selected_items.values()), grouped_items
 
     def _create_state_doc(self, item: NewsModel, url: str, executed_at: datetime, status: str) -> dict:
         """Return a news_state document payload for the given URL key."""
@@ -272,20 +252,3 @@ class IngestService:
         """Return the normalized execution time floored to the nearest 10-minute UTC."""
         utc_dt = executed_at.astimezone(timezone.utc)
         return utc_dt.replace(second=0, microsecond=0, minute=(utc_dt.minute // 10) * 10)
-
-
-def get_ingest_service(
-    source_semaphore: asyncio.Semaphore = Depends(get_source_semaphore),
-    firestore_client: firestore.AsyncClient = Depends(get_firestore_client),
-    storage_client: storage.Client = Depends(get_storage_client),
-) -> IngestService:
-    """Provide FastAPI dependency for IngestService."""
-    source_plugins = [source_cls(semaphore=source_semaphore) for source_cls in ENABLED_SOURCE_CLASSES]
-    firestore_provider = FirestoreProvider(client=firestore_client)
-    storage_provider = CloudStorageProvider(client=storage_client, bucket_name=settings.raw_bucket_name)
-
-    return IngestService(
-        source_plugins=source_plugins,
-        firestore_provider=firestore_provider,
-        storage_provider=storage_provider,
-    )

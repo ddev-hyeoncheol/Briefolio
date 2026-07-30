@@ -1,7 +1,6 @@
 import asyncio
 import random
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
 from datetime import datetime
 
 import feedparser
@@ -10,12 +9,9 @@ import newspaper
 from tenacity import retry, retry_if_result, stop_after_attempt, wait_fixed
 
 from src.config.config import settings
-from src.core.logger import get_logger
 from src.core.transient import is_transient_http_status_code
-from src.models.entities.news import NewsModel
-from src.models.schemas.sources.common import SourceEnrichedArticleSchema
-
-logger = get_logger(__name__)
+from src.ingest.models.news import NewsModel
+from src.ingest.models.sources.common import ArticleEnrichmentSchema
 
 _retry = retry(
     retry=retry_if_result(lambda res: is_transient_http_status_code(res[0])),
@@ -25,7 +21,7 @@ _retry = retry(
 )
 
 
-class RssSource(ABC):
+class RssPlugin(ABC):
     """
     Abstract base for RSS-backed news source implementations.
 
@@ -42,38 +38,38 @@ class RssSource(ABC):
 
     @property
     @abstractmethod
-    def RSS_URL(self) -> str:
+    def rss_url(self) -> str:
         """Return the base RSS feed URL."""
         pass
 
     @property
-    def RSS_ENTRY_STORAGE_FIELDS(self) -> set[str]:
+    def rss_entry_storage_fields(self) -> set[str]:
         """Return DTO fields mapped to first-class storage columns and excluded from metadata dumps."""
         return set()
 
     @property
-    def RSS_ENTRY_METADATA_FIELDS(self) -> set[str]:
+    def rss_entry_metadata_fields(self) -> set[str]:
         """Return known source RSS fields intended for metadata after DTO mapping."""
         return set()
 
     @property
-    def RSS_ENTRY_IGNORED_FIELDS(self) -> set[str]:
+    def rss_entry_ignored_fields(self) -> set[str]:
         """Return RSS fields intentionally ignored by this source."""
         return set()
 
     @property
-    def RSS_ENTRY_KNOWN_FIELDS(self) -> set[str]:
+    def rss_entry_known_fields(self) -> set[str]:
         """Return all known top-level RSS entry fields."""
-        return self.RSS_ENTRY_STORAGE_FIELDS | self.RSS_ENTRY_METADATA_FIELDS | self.RSS_ENTRY_IGNORED_FIELDS
+        return self.rss_entry_storage_fields | self.rss_entry_metadata_fields | self.rss_entry_ignored_fields
 
     @property
-    def BOILERPLATE_CONTENTS(self) -> dict[str, str]:
+    def boilerplate_contents(self) -> dict[str, str]:
         """Return exact non-article boilerplate content keyed by diagnostic name."""
         return {}
 
-    def __init__(self, semaphore: asyncio.Semaphore) -> None:
+    def __init__(self, enrich_semaphore: asyncio.Semaphore) -> None:
         """Initialize with a shared semaphore to limit concurrent enrich requests."""
-        self._semaphore = semaphore
+        self._enrich_semaphore = enrich_semaphore
         self._user_agent = settings.user_agent
         self._newspaper_config = newspaper.Config()
 
@@ -91,16 +87,12 @@ class RssSource(ABC):
         and other successful items continue.
         """
         if not items:
-            logger.info(
-                "RssSource enrich skipped | source: %s, reason: no items",
-                self.source,
-            )
             return []
 
-        tasks = [self._enrich(item.entry_url) for item in items]
+        tasks = [self._enrich_article(item.entry_url) for item in items]
         enrichments = await asyncio.gather(*tasks)
 
-        unique_candidates: dict[str, NewsModel] = {}
+        enriched_items: list[NewsModel] = []
 
         for item, enriched in zip(items, enrichments):
             content = enriched.content
@@ -138,35 +130,22 @@ class RssSource(ABC):
             )
 
             new_item = item.model_copy(update=update_fields)
+            enriched_items.append(new_item)
 
-            existing_item = unique_candidates.get(new_item.news_id)
-            if existing_item is None or (existing_item.status != "success" and new_item.status == "success"):
-                unique_candidates[new_item.news_id] = new_item
-
-        deduplicated_items = list(unique_candidates.values())
-        success_count = sum(1 for item in deduplicated_items if item.status == "success")
-        failed_count = sum(1 for item in deduplicated_items if item.status != "success")
-        logger.info(
-            "RssSource enrich completed | source: %s, count: %d, success_count: %d, failed_count: %d",
-            self.source,
-            len(deduplicated_items),
-            success_count,
-            failed_count,
-        )
-        return deduplicated_items
+        return enriched_items
 
     def _find_matching_boilerplate(self, content: str | None) -> str | None:
         """Return the diagnostic name for exact boilerplate content matches."""
         if content is None:
             return None
-        for name, boilerplate in self.BOILERPLATE_CONTENTS.items():
+        for name, boilerplate in self.boilerplate_contents.items():
             if content == boilerplate:
                 return name
         return None
 
     async def _fetch_feed(self) -> feedparser.FeedParserDict:
         """Fetch raw RSS feed using feedparser and validate HTTP status."""
-        feed = await asyncio.to_thread(feedparser.parse, self.RSS_URL, agent=self._user_agent)
+        feed = await asyncio.to_thread(feedparser.parse, self.rss_url, agent=self._user_agent)
 
         status = feed.get("status")
         if status is None:
@@ -177,13 +156,13 @@ class RssSource(ABC):
 
         return feed
 
-    async def _enrich(self, url: str) -> SourceEnrichedArticleSchema:
+    async def _enrich_article(self, url: str) -> ArticleEnrichmentSchema:
         """
         Fetch and parse full article content for a single URL.
 
         Use httpx for async I/O to get status_code and HTML,
         then use newspaper4k for CPU-bound text extraction.
-        Return a SourceEnrichedArticleSchema with extracted article fields and diagnostics.
+        Return an ArticleEnrichmentSchema with extracted article fields and diagnostics.
         Limit concurrent requests across all sources using the shared semaphore.
         """
         status_code, html, error_message = await self._fetch_html(url)
@@ -195,7 +174,7 @@ class RssSource(ABC):
             except Exception as e:
                 error_message = f"Parsing failed::{type(e).__name__}::{e}"
 
-        return SourceEnrichedArticleSchema(
+        return ArticleEnrichmentSchema(
             status_code=status_code,
             error_message=error_message,
         )
@@ -206,7 +185,7 @@ class RssSource(ABC):
         try:
             # Jitter each attempt to reduce bursty requests against article hosts.
             await asyncio.sleep(random.uniform(0.1, 0.5))
-            async with self._semaphore:
+            async with self._enrich_semaphore:
                 async with httpx.AsyncClient(follow_redirects=True) as client:
                     response = await client.get(url, headers={"User-Agent": self._user_agent}, timeout=10.0)
                     return response.status_code, response.text, None
@@ -214,19 +193,7 @@ class RssSource(ABC):
             # Network error or unexpected exception before receiving an HTTP response.
             return None, None, f"Network error::{type(e).__name__}::{e}"
 
-    def _warn_unknown_fields(self, entry_data: Mapping, seen_unknowns: set[str]) -> None:
-        """Warn once for newly encountered RSS fields not present in defined schemas."""
-        unknown_fields = entry_data.keys() - self.RSS_ENTRY_KNOWN_FIELDS
-        new_unknowns = unknown_fields - seen_unknowns
-        if new_unknowns:
-            logger.warning(
-                "RssSource fetch unknown_fields detected | source: %s, fields: %s",
-                self.source,
-                sorted(new_unknowns),
-            )
-            seen_unknowns.update(new_unknowns)
-
-    def _parse_article_html(self, url: str, html: str) -> SourceEnrichedArticleSchema:
+    def _parse_article_html(self, url: str, html: str) -> ArticleEnrichmentSchema:
         """Extract text and metadata from raw HTML synchronously using newspaper4k."""
         article = newspaper.Article(url, config=self._newspaper_config)
         article.html = html
@@ -238,7 +205,7 @@ class RssSource(ABC):
         language = getattr(article, "meta_lang", None) or None
         content = getattr(article, "text", None) or None
 
-        return SourceEnrichedArticleSchema(
+        return ArticleEnrichmentSchema(
             authors="|".join(authors) if authors else None,
             canonical_url=canonical_url,
             image_url=image_url,
