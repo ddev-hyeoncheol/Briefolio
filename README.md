@@ -205,67 +205,60 @@ curl -X POST "http://localhost:8080/batch/run" \
 
 ## 🔌 새 뉴스 소스 추가하기
 
-1. `src/models/schemas/sources/` 아래에 source별 RSS entry DTO를 추가합니다.
-2. `src/worker/plugins/sources/` 아래에 `SourcePlugin` 구현체를 추가합니다.
-3. `source`, `RSS_URL`, `RSS_ENTRY_STORAGE_FIELDS`, `RSS_ENTRY_METADATA_FIELDS`, `RSS_ENTRY_IGNORED_FIELDS` 프로퍼티를 정의합니다.
-4. `run_fetch(executed_at: datetime)`에서 DTO 검증 후 RSS 항목을 `BronzeNewsModel` 리스트로 매핑합니다.
-5. 배포 대상 source만 `src/worker/services/batch.py`의 `get_batch_service()`에 등록합니다.
+1. `src/ingest/models/sources/` 아래에 source별 RSS entry DTO를 추가합니다.
+2. `src/ingest/plugins/sources/` 아래에 `RssPlugin` 구현체를 추가합니다.
+3. `source`, `rss_url`, `rss_entry_storage_fields`, `rss_entry_metadata_fields`, `rss_entry_ignored_fields` 프로퍼티를 정의합니다.
+4. `run_fetch(executed_at: datetime)`에서 DTO 검증 후 RSS 항목을 `NewsModel` 리스트로 매핑합니다.
+5. 배포 대상 source만 `src/ingest/dependencies.py`의 `ENABLED_SOURCE_CLASSES`에 등록합니다.
 
-아래 코드는 핵심 흐름만 보여주는 최소 예시이며, 실제 source에서는 날짜 파싱 helper와 로그를 기존 구현과 맞춰 보강합니다.
+아래 코드는 핵심 흐름만 보여주는 최소 예시이며, 실제 source에서는 날짜 파싱 helper를 기존 구현과 맞춰 보강합니다.
 
 ```python
-from collections.abc import Mapping
 from datetime import datetime, timezone
 
-from src.models.entities.bronze_news import BronzeNewsModel
-from src.models.schemas.sources.my_new_source import MyNewSourceEntrySchema
-from src.worker.plugins.source import SourcePlugin
+from src.ingest.models.news import NewsModel
+from src.ingest.models.sources.my_new_source import MyNewSourceEntrySchema
+from src.ingest.plugins.rss import RssPlugin
 
 
-class MyNewSource(SourcePlugin):
+class MyNewSource(RssPlugin):
     @property
     def source(self) -> str:
         return "my_new_source"
 
     @property
-    def RSS_URL(self) -> str:
+    def rss_url(self) -> str:
         return "https://example.com/rss"
 
     @property
-    def RSS_ENTRY_STORAGE_FIELDS(self) -> set[str]:
+    def rss_entry_storage_fields(self) -> set[str]:
         return {"link", "title", "published_parsed"}
 
     @property
-    def RSS_ENTRY_METADATA_FIELDS(self) -> set[str]:
+    def rss_entry_metadata_fields(self) -> set[str]:
         return {"id", "summary"}
 
     @property
-    def RSS_ENTRY_IGNORED_FIELDS(self) -> set[str]:
+    def rss_entry_ignored_fields(self) -> set[str]:
         return {"links", "title_detail", "summary_detail", "published"}
 
-    async def run_fetch(self, executed_at: datetime) -> list[BronzeNewsModel]:
+    async def run_fetch(self, executed_at: datetime) -> list[NewsModel]:
         raw_feed = await self._fetch_feed()
         entries_data = raw_feed.get("entries") or []
-        results: list[BronzeNewsModel] = []
-        seen_unknowns: set[str] = set()
+        results: list[NewsModel] = []
 
         for entry_data in entries_data:
             try:
-                if isinstance(entry_data, Mapping):
-                    self._warn_unknown_fields(entry_data=entry_data, seen_unknowns=seen_unknowns)
                 entry = MyNewSourceEntrySchema.model_validate(entry_data)
             except Exception:
                 continue
 
-            entry_id = self._make_id(entry.link)
             published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-            metadata = entry.model_dump(exclude=self.RSS_ENTRY_STORAGE_FIELDS, mode="json")
+            metadata = entry.model_dump(exclude=self.rss_entry_storage_fields, mode="json")
 
             results.append(
-                BronzeNewsModel(
+                NewsModel(
                     executed_at=executed_at,
-                    entry_id=entry_id,
-                    news_id=entry_id,
                     source=self.source,
                     title=entry.title,
                     entry_url=entry.link,
@@ -280,8 +273,5 @@ class MyNewSource(SourcePlugin):
 등록 예시는 다음과 같습니다.
 
 ```python
-source_plugins = [
-    YahooFinanceSource(semaphore=source_semaphore),
-    MyNewSource(semaphore=source_semaphore),
-]
+ENABLED_SOURCE_CLASSES = (YahooFinanceSource, MyNewSource)
 ```

@@ -12,12 +12,6 @@
 
 ## Infrastructure & Deployment
 
-### [Security] Cloud Run Allows Unauthenticated Calls
-
-- **설명**: 현재 `cloudbuild/cloudbuild.yml`에서 API와 Worker Cloud Run 서비스 모두 `--allow-unauthenticated` 인자로 배포됩니다.
-- **영향**: Worker가 공개되면 악의적인 무단 호출로 파이프라인 비용이 청구되거나 데이터 수집이 오작동할 위험이 있습니다. API 공개는 현재 제품 요구에 맞춘 의도된 선택입니다.
-- **해결 방안**: Worker 수동 테스트 흐름과 Cloud Scheduler OIDC 호출 구성이 정리되면 Worker 서비스는 `--no-allow-unauthenticated`로 전환하고, 호출 주체에 `roles/run.invoker` 권한을 부여합니다.
-
 ### [Deployment] Terraform Apply Trigger Separation
 
 - **설명**: 로컬에서 `terraform plan`을 확인한 뒤 push하더라도, push trigger에서 `terraform apply`까지 자동 실행하면 Cloud Build 실행 시점의 원격 state, 권한, provider 환경 차이를 다시 확인하지 못합니다.
@@ -48,6 +42,6 @@
 
 ### [Gaps] Missing Core Logic Automated Tests
 
-- **설명**: 현재 FastAPI 라우터, `IngestService`, `RssSource` 플러그인 등 핵심 워크플로 및 뉴스 수집 파이프라인을 검증하는 단위/통합 테스트가 존재하지 않습니다.
+- **설명**: 현재 FastAPI 라우터, `IngestService`, `RssPlugin` 등 핵심 워크플로 및 뉴스 수집 파이프라인을 검증하는 단위/통합 테스트가 존재하지 않습니다.
 - **영향**: 코드베이스를 변경하거나 리팩토링할 때, 예외 처리 흐름이나 뉴스 수집 파이프라인의 오작동 및 회귀 버그를 감지하기 어렵습니다.
 - **해결 방안**: `pytest` 및 `httpx.AsyncClient`를 도입하여, 라우터 엔드포인트의 입력 검증, 모의(Mocking) `FirestoreProvider`/`CloudStorageProvider` 동작, 그리고 dedup·append-only 적재 흐름을 검증하는 테스트 코드를 구축해야 합니다.

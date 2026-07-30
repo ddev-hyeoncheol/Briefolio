@@ -5,6 +5,7 @@
 - 제품 표시 이름은 `Briefolio`입니다.
 - 저장소 및 리소스에 사용하는 기술 식별자는 `briefolio`입니다.
 - 기존 `Gemini News Brief` 명칭은 전환 과정에서 순차적으로 제거합니다.
+- 단, `make_url_id()`의 namespace seed `gemini-news-brief`는 기존 Firestore dedup 키 호환성을 위해 유지합니다.
 - 프로젝트 이름은 특정 AI provider나 저장 계층을 포함하지 않습니다.
 - `Briefolio Intelligence`는 기존 Warehouse와 Enrichment 책임을 하나의 경계로 통합합니다.
 
@@ -15,16 +16,16 @@
 | Intelligence | `Briefolio Intelligence` | `briefolio-intelligence` | BigQuery/Dataform 정제, AI 보강, serving용 mart 생성 |
 | Serving | `Briefolio Serving` | `briefolio-serving` | 사용자 API, 검색, 캐시, 조회 저장소 관리 |
 
-- 프로젝트 ID는 목표 식별자이며 실제 GCP project 생성 전에 전역 사용 가능 여부를 확인합니다.
+- Seed와 Ingest 프로젝트는 생성 완료 상태이며, Intelligence와 Serving 프로젝트 ID는 실제 생성 전에 전역 사용 가능 여부를 확인합니다.
 - 개발·운영 환경을 별도 GCP project로 분리할 때는 프로젝트 ID 끝에 `-dev`, `-prod` 환경 접미사를 추가합니다.
 
 ## 1. 전체 방향성
 
 이 프로젝트의 장기 목표는 단일 배치 애플리케이션 안에서 수집, 정제, AI 처리, 서빙을 모두 수행하는 구조에서 벗어나, 각 계층의 책임을 명확히 분리한 데이터 플랫폼 구조로 전환하는 것이다.
 
-현재 구조는 `BatchService.run_pipeline()` 안에서 `BRONZE NEWS → SILVER NEWS → SILVER NEWS_AUGMENTED`가 순차 실행되는 형태이다. 즉 수집, 정제, AI 증강이 하나의 파이프라인 호출 안에 강하게 결합되어 있다.
+전환 이전에는 `BatchService.run_pipeline()` 안에서 `BRONZE NEWS → SILVER NEWS → SILVER NEWS_AUGMENTED`를 순차 실행하고, `BronzeStore`가 BigQuery `bronze.news`에 직접 적재했다. 이 런타임은 현재 코드에서 제거되었다.
 
-또한 현재 Bronze 저장은 `BronzeStore.load_bronze_news()`에서 BigQuery `bronze.news`에 직접 JSON load job을 수행하는 방식이다. 장기적으로 raw 데이터는 BigQuery가 아니라 Cloud Storage 기반 Data Lake로 옮기고, BigQuery는 Silver 이후의 정제·분석·서빙 준비 계층으로 사용하는 방향이 맞다.
+현재는 Ingest 경계가 먼저 분리되어 `POST /ingest/run`에서 Firestore 중복 조회, `newspaper4k` 본문 추출, GCS raw JSONL·manifest 적재, Firestore 상태 기록을 수행한다. 구현 경로는 `src/ingest/`로 전환했으며, Intelligence의 BigQuery/Dataform/AI 처리와 Serving API는 구현 전이다.
 
 최종 목표 구조는 다음과 같다.
 
@@ -45,7 +46,7 @@ Briefolio Serving (briefolio-serving)
   → User-facing service
 ```
 
-단, `silver.news → silver.news_augmented`는 단기적으로 기존 Gemini API 기반 Cloud Run worker를 유지하되, 장기적으로는 별도 서비스 없이 BigQuery에서 Vertex AI remote model을 직접 호출하는 Dataform SQL 스텝으로 전환한다 (검증 실패 시에만 Cloud Run 기반 Vertex AI 구조로 대체).
+`silver.news → silver.news_augmented`는 별도 서비스 없이 BigQuery에서 Vertex AI remote model을 호출하는 Dataform SQL 스텝을 우선 검증한다. 구조화된 출력이나 실패 격리 요구를 충족하지 못할 때만 Briefolio Intelligence 내부에 Cloud Run 기반 Vertex AI worker를 추가한다.
 
 ---
 
@@ -94,7 +95,7 @@ Firestore collection:
     # error_message: 실패 문서에만 포함
 ```
 
-조회는 두 단계다: Enrich 이전에 entry URL 키로 1차 필터, Enrich 후 canonical URL로 키가 바뀐 item만 2차 필터. 필터 조건은 "키 문서가 없거나 최신 status가 `failed`이면 재시도 대상으로 통과"이며, 현행 BigQuery 7일 윈도우 조회의 재시도 정책을 그대로 유지한다. `expires_at`은 이 7일 정책을 Firestore TTL로 구현한 필드다.
+조회는 두 단계다: Enrich 이전에 entry URL 키로 1차 필터, Enrich 후 canonical URL로 키가 바뀐 item만 2차 필터. 필터 조건은 "키 문서가 없거나 최신 status가 `failed`이면 재시도 대상으로 통과"이며, 이전 BigQuery 7일 윈도우 조회의 재시도 정책을 그대로 유지한다. `expires_at`은 이 7일 정책을 Firestore TTL로 구현한 필드다.
 
 Ingest가 담당할 작업은 다음이다.
 
@@ -151,8 +152,10 @@ Ingest는 다음 조건을 만족하면 완료된 것으로 본다.
 - 캡처별 manifest JSON 생성
 - GCS에 저장된 JSONL을 Python에서 재독해 가능
 - BigQuery에 직접 bronze.news를 쓰지 않음
-- Cloud Run Job 또는 Cloud Run Service에서 독립 실행 가능
+- Cloud Run Service에서 독립 실행 가능
 ```
+
+현재 코드에는 Firestore 중복 필터, GCS JSONL·manifest 적재, 10분 슬롯과 호출별 `run_id`가 구현되어 있다. Ingest 경로, 전용 Model, dependency 조립 경계와 컨테이너 실행 경로도 전환했으며, 배포 설정 정리와 실제 GCP 환경의 독립 실행 검증은 Phase 1의 남은 작업이다.
 
 ---
 
@@ -174,7 +177,7 @@ Intelligence가 담당할 작업은 다음이다.
 - serving export source 생성
 ```
 
-기존 Python of `SilverNewsModel.from_bronze_news()`는 `status == "success"`이고 `content is not None`인 row만 통과시키며, `canonical_url or entry_url`을 대표 URL로 사용한다. 이 로직은 SQL로 옮기기 적합하다.
+삭제된 Python `SilverNewsModel.from_bronze_news()`는 `status == "success"`이고 `content is not None`인 row만 통과시키며, `canonical_url or entry_url`을 대표 URL로 사용했다. Dataform 구현은 [레거시 Bronze/Silver 로직](docs/legacy/bronze-silver-bigquery-logic.md)에 보존된 이 규칙을 SQL로 승계한다.
 
 ### 4.2 Dataform 도입 방향
 
@@ -198,7 +201,7 @@ Eventarc는 트리거 생성 이전 객체나 재시도 보존 기간을 넘긴 
 
 `silver.news`는 정제된 뉴스 원문 테이블이다.
 
-주요 필드는 현재 모델을 유지한다. `news_id`는 Ingest가 URL(canonical 우선) 기반 UUID v5로 유도해 raw JSONL에 포함한다.
+주요 필드는 Ingest의 raw `NewsModel`에서 승계한다. `news_id`는 Ingest가 URL(canonical 우선) 기반 UUID v5로 유도해 raw JSONL에 포함한다.
 
 ```text
 executed_at
@@ -262,7 +265,7 @@ Intelligence는 다음 조건을 만족하면 완료된 것으로 본다.
 - silver.news가 partitioned / clustered table로 생성됨
 - news_id 중복 제거 및 Overwrite 기반의 멱등성 적재 가능
 - assertion 실패 시 workflow 실패 처리 가능
-- Python _run_silver_news 의존도 제거
+- Ingest 런타임과 독립적으로 실행 가능
 ```
 
 ---
@@ -271,11 +274,11 @@ Intelligence는 다음 조건을 만족하면 완료된 것으로 본다.
 
 ### 5.1 현재 위치
 
-현재 `silver.news → silver.news_augmented`는 Python worker에서 Gemini provider를 호출하는 구조다. 현재 `BatchService`도 `SILVER NEWS_AUGMENTED` 단계를 pipeline task로 포함하고 있다.
+현재 코드에는 AI augmentation 런타임이 없다. 이전 Python batch·Gemini 구현은 Ingest 분리 과정에서 제거되었고, 필요한 프롬프트와 출력 스키마만 `docs/legacy/`에 참고 자료로 보존되어 있다.
 
-단기적으로는 이 구조를 유지하되, `silver.news` 생성은 Dataform으로 넘기고, AI augmentation worker는 `silver.news`를 읽어 `silver.news_augmented`에 적재하는 역할만 맡긴다. 이 Cloud Run worker 구조는 5.3의 SQL 네이티브 검증이 끝나기 전까지의 임시 경로이며, 검증에 실패했을 때의 fallback 경로로도 유지한다.
+따라서 기존 worker를 유지하거나 먼저 복원하지 않는다. `silver.news`가 준비되면 SQL 네이티브 경로를 우선 프로토타이핑하고, 검증에 실패했을 때만 Cloud Run fallback을 새로 구현한다.
 
-### 5.2 단기 구조
+### 5.2 Cloud Run fallback 구조
 
 ```text
 Dataform
@@ -283,13 +286,15 @@ Dataform
 
 Cloud Run AI Augment Worker
   → BigQuery silver.news extract
-  → Gemini API call
+  → Vertex AI SDK call
   → BigQuery silver.news_augmented load
 ```
 
-### 5.3 장기 Vertex AI 구조
+이 구조는 5.3의 SQL 네이티브 검증에 실패했을 때만 채택한다.
 
-장기적으로는 별도 실행 서비스 없이 BigQuery SQL에서 Vertex AI remote model을 직접 호출하는 구조로 전환한다.
+### 5.3 우선 검증할 SQL 네이티브 구조
+
+별도 실행 서비스 없이 BigQuery SQL에서 Vertex AI remote model을 직접 호출하는 구조를 우선 검증한다.
 
 ```text
 BigQuery silver.news
@@ -306,7 +311,7 @@ BigQuery silver.news
 - ai_market_entities처럼 REPEATED RECORD가 포함된 output schema를 구조화된 출력 함수가 한 번에 생성할 수 있는지
 - 한글 번역/요약처럼 여러 개의 장문 텍스트 필드를 하나의 호출로 안정적으로 받을 수 있는지
 - row 단위 생성 실패가 전체 쿼리를 중단시키지 않고 해당 row만 실패로 남는지
-- 현재 3개 기사 chunk 호출 대비 row 단위 호출의 비용/처리 시간 차이
+- 삭제된 기존 3개 기사 chunk 호출 대비 row 단위 호출의 비용/처리 시간 차이
 ```
 
 검증에 실패하면 다음 Cloud Run 기반 구조로 대체한다.
@@ -322,15 +327,13 @@ silver.news
 
 ### 5.4 provider abstraction
 
-Vertex AI 전환을 쉽게 하기 위해 먼저 provider interface를 분리한다.
+provider abstraction은 Cloud Run fallback을 채택할 때만 검토한다.
 
 ```text
-AiProvider
-  - GeminiApiProvider
+AiNewsAugmentationProvider
   - VertexAiProvider
+  - TestAiProvider (테스트 대역이 필요할 때)
 ```
-
-현재는 Gemini API를 직접 쓰더라도, 상위 service는 provider 구현체를 몰라야 한다.
 
 권장 interface는 다음과 같다.
 
@@ -343,7 +346,7 @@ class AiNewsAugmentationProvider:
         ...
 ```
 
-이 provider abstraction은 5.2(Gemini API worker)나 5.3의 fallback 경로(Cloud Run + Vertex AI SDK)에서만 필요하다. 5.3의 SQL 네이티브 경로가 검증되어 채택되면 AI 호출이 전부 Dataform SQL 안에 있으므로 이 Python provider abstraction은 필요 없어진다. 따라서 이 작업은 SQL 네이티브 검증 결과가 나올 때까지 낮은 우선순위로 둔다.
+SQL 네이티브 경로가 채택되면 Python provider는 만들지 않는다. Cloud Run fallback에서도 단일 Vertex AI 구현만 필요하면 구체 adapter로 시작하고, 복수 provider나 테스트 대역 교체 요구가 생길 때 interface를 추가한다.
 
 ### 5.5 silver.news_augmented 유지 전략
 
@@ -450,13 +453,15 @@ Terraform도 서비스 경계에 맞춰 나눈다. 각 경계는 처음부터 �
 terraform/
   bootstrap.sh   # briefolio-seed project/상태 버킷 생성용 1회성 수동 스크립트 (Terraform 밖에서 실행)
   ingest/        # briefolio-ingest state root
-  intelligence/  # briefolio-intelligence state root
-  serving/       # briefolio-serving state root
+  intelligence/  # briefolio-intelligence state root placeholder
+  serving/       # briefolio-serving state root placeholder
 ```
 
-각 root(`ingest/`, `intelligence/`, `serving/`)는 `main.tf`(backend)와 `provider.tf`로 구성되고, `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`{경계}`).
+각 root(`ingest/`, `intelligence/`, `serving/`)는 `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`{경계}`). Ingest root에는 API, GCS, Firestore 리소스가 선언되어 있고, Intelligence와 Serving root는 현재 backend와 provider만 준비된 상태다.
 
 `seed/` root는 아직 없다. `briefolio-seed` project와 상태 버킷(`briefolio-tfstate`)은 `bootstrap.sh`로 생성했고, 현재 Terraform으로 관리할 추가 리소스가 없기 때문이다. 공유 CI/CD 같은 리소스가 필요해지면 그때 `terraform/seed/`를 추가한다.
+
+`terraform/` 바로 아래의 Artifact Registry·BigQuery 등 기존 `.tf` 파일은 이전 단일 프로젝트 구성이며, 새 경계 root에서 필요한 리소스를 확정한 뒤 제거할 정리 대상이다. 새 리소스는 이 레거시 root에 추가하지 않는다.
 
 ### 7.2 향후 구조
 
@@ -506,15 +511,22 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 
 목표는 schema와 데이터 계약을 먼저 확정하는 것이다.
 
-작업:
+현재 완료:
 
 ```text
 - NewsModel schema 확정
-- SilverNewsModel schema 확정
-- SilverNewsAugmentedModel schema 확정
-- GCS JSONL schema version 정의
+- make_url_id() namespace seed와 URL 정규화 규칙 고정
 - run_id 규칙 정의
 - Firestore 수집 중복 여부 인덱스 스키마 정의
+- GCS data/manifest path convention 정의
+```
+
+남은 작업:
+
+```text
+- GCS JSONL schema_version 정의 및 record에 반영
+- Phase 2 구현 시 SilverNewsModel schema 확정
+- Phase 3 구현 시 SilverNewsAugmentedModel schema 확정
 ```
 
 완료 기준:
@@ -531,44 +543,59 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 
 목표는 raw 수집을 BigQuery에서 Cloud Storage로 옮기는 것이다.
 
-작업:
+현재 완료:
 
 ```text
-- src/worker/ → src/ingest/, src/api/ → src/serving/ 디렉토리 리네이밍
-- src/core/dependencies.py에서 service별 provider 의존성을 ingest/serving 각자의 dependencies.py로 분리
 - CloudStorageProvider 추가
 - FirestoreProvider 및 중복 필터 로직 추가
 - requirements.txt에 google-cloud-storage, google-cloud-firestore 추가
-- GCS bucket 및 Firestore 설정 추가
+- GCS bucket 및 Firestore Terraform 추가
 - load를 BigQuery에서 GCS JSONL로 변경
-- /ingest/run 독립 실행 검증
+- source별 JSONL과 manifest 생성
+- /ingest/run 진입점 구현
+- src/worker/ → src/ingest/ 디렉토리 리네이밍
+- Router·Service 단일 모듈 평탄화와 Ingest 전용 Model 이동
+- src/ingest/dependencies.py로 app state 기반 조립 경계 분리
+- canonical news_id 축약과 alias entry_key 상태 기록을 Service로 이동
+- Dockerfile과 Cloud Build의 실행 경로·Ingest 서비스 이름 전환
+- Cloud Run 배포에서 unauthenticated 호출 차단
+```
+
+남은 작업:
+
+```text
+- README와 Cloud Build의 남은 레거시 명칭·secret 설정 정리
+- Cloud Run·Cloud Scheduler Terraform 및 OIDC·roles/run.invoker 구성
+- 실제 GCP 환경에서 /ingest/run, GCS, Firestore 통합 검증
 ```
 
 완료 기준:
 
 ```text
-- src/ingest, src/serving, src/core 구조로 재편됨 (13절 참고)
+- src/ingest와 src/core의 책임 경계가 정리되고 레거시 src/worker가 없음 (13절 참고)
 - BigQuery bronze.news에 쓰지 않음
-- GCS에 batch별 JSONL 생성
+- GCS에 source 캡처별 JSONL·manifest 생성
 - Firestore에 수집 이력 기록 및 중복 필터 작동
 - GCS JSONL 재독해 가능
+- Cloud Scheduler에서 인증된 Cloud Run Ingest 호출 가능
 ```
 
 ---
 
 ### Phase 2. Dataform 기반 Silver 전환
 
-목표는 Python의 `_run_silver_news()`를 Dataform으로 대체하는 것이다.
+목표는 GCS raw를 BigQuery native staging table로 적재하고, 삭제된 Python Silver 변환 규칙을 Dataform SQL로 복원하는 것이다.
 
 작업:
 
 ```text
 - Dataform repository 구성
-- bronze_staging.news_raw staging table 생성 및 GCS → BigQuery load job 구성
+- bronze_staging.news_raw staging table 생성
+- Eventarc 기반 GCS → BigQuery load handler와 결정적 jobId 구성
+- prefix 재스캔 기반 백필·재조정 절차 구성
 - silver.news incremental table 생성 (Overwrite 멱등성 쿼리 적용)
 - dedupe SQL 작성
 - assertions 추가
-- 기존 Python Silver transform 비활성화
 ```
 
 완료 기준:
@@ -594,7 +621,7 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 - ai_market_entities 등 REPEATED RECORD 출력 검증
 - 한글 번역/요약 다중 필드 출력 검증
 - row 단위 실패 처리 방식 검증
-- 기존 3개 chunk 호출 대비 row 단위 호출의 비용/처리 시간 비교
+- 삭제된 기존 3개 chunk 호출 대비 row 단위 호출의 비용/처리 시간 비교
 ```
 
 완료 기준 (3a):
@@ -615,11 +642,11 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 작업 (3c. Cloud Run fallback 채택 시):
 
 ```text
-- AI worker를 /batch/silver/news_augmented 전용으로 단순화
+- src/intelligence/에 AI augmentation 전용 Cloud Run worker 추가
 - silver.news에서 미처리 row만 추출
 - silver.news_augmented에 append 또는 merge
-- provider interface 추가
-- GeminiApiProvider를 interface 구현체로 이동
+- Vertex AI SDK adapter 추가
+- 복수 구현이나 테스트 대역이 필요할 때만 provider interface 추가
 ```
 
 완료 기준 (3b/3c 공통):
@@ -633,26 +660,25 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 
 ---
 
-### Phase 4. Vertex AI 전환 준비 (Phase 3에서 3c를 선택했을 때만 진행)
+### Phase 4. Cloud Run fallback 운영화 (Phase 3에서 3c를 선택했을 때만 진행)
 
-목표는 Gemini API 직접 호출 구조를 Vertex AI로 교체 가능한 구조로 만드는 것이다. Phase 3에서 3b(SQL 네이티브)가 채택되면 이미 Vertex AI를 SQL에서 직접 쓰고 있으므로 이 phase는 건너뛴다.
+목표는 Vertex AI 기반 Cloud Run fallback의 재시도, 관측성, 스키마 호환성을 운영 수준으로 높이는 것이다. Phase 3에서 3b(SQL 네이티브)가 채택되면 이 phase는 건너뛴다.
 
 작업:
 
 ```text
 - VertexAiProvider 추가
-- provider selection config 추가
 - prompt_version 관리
 - schema validation 유지
 - 비용/token/latency logging 표준화
-- Gemini API와 Vertex AI 결과 비교
+- item 단위 실패 격리와 재시도 구성
 ```
 
 완료 기준:
 
 ```text
-- 동일 Silver input으로 Gemini API / Vertex AI A/B 실행 가능
-- silver.news_augmented schema 변경 없이 provider 교체 가능
+- 동일 Silver input 재실행 시 이미 처리된 news_id skip 가능
+- silver.news_augmented schema validation 가능
 - model_provider로 결과 출처 구분 가능
 ```
 
@@ -684,17 +710,25 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 
 ### Phase 6. Terraform / GCP Project 분리
 
-목표는 운영 경계를 인프라 경계로 확장하는 것이다.
+목표는 이미 나눈 Terraform state root를 실제 서비스 리소스와 배포 경계까지 확장하는 것이다.
 
-작업:
+현재 완료:
 
 ```text
-- Terraform modules 분리
-- envs/dev, envs/prod 구성
-- core / ingest / intelligence / serving module 정리
-- remote state 분리 검토
-- GCP project 분리 검토
+- bootstrap.sh로 Seed project와 remote state 버킷 생성
+- ingest / intelligence / serving별 Terraform root와 state prefix 분리
+- Seed와 Ingest GCP project 생성
+- Ingest GCS·Firestore 리소스 선언
+```
+
+남은 작업:
+
+```text
+- terraform/ 바로 아래 레거시 단일 프로젝트 리소스 제거
+- Intelligence·Serving 구현 시 각 root에 실제 리소스 추가
 - cross-project IAM 구성
+- 경계별 CI/CD와 배포 설정 분리
+- 다중 환경이 필요해질 때만 envs/dev, envs/prod 구성
 ```
 
 완료 기준:
@@ -712,19 +746,16 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 가장 먼저 해야 할 순서는 다음이다.
 
 ```text
-1. GCS Raw Data Lake 전환 및 Firestore 중복 체크 연동
-2. Dataform으로 silver.news 생성 (Overwrite 멱등성 쿼리)
-3. AI augmentation SQL 네이티브(Vertex AI remote model) 검증
-4. (검증 실패 시에만) Cloud Run 기반 AI augmentation 독립 실행 및 provider abstraction
-5. Serving 저장소 분리
-6. Terraform module 분리
-7. GCP project/state 분리
+1. Ingest 배포 설정 정리와 실제 GCP 통합 검증
+2. GCS raw schema_version 확정
+3. BigQuery native staging과 Dataform silver.news 구현
+4. AI augmentation SQL 네이티브(Vertex AI remote model) 검증
+5. 검증 실패 시에만 Cloud Run 기반 AI augmentation 구현
+6. Serving 저장소와 API 분리
+7. 단계별 cross-project IAM·Terraform·CI/CD 완성
 ```
 
-즉 지금 당장 해야 할 핵심은 **Ingest 분리와 raw 저장소 전환 및 중복 제거 분리**이다.
-Serving이나 GCP project 분리는 나중에 해도 된다.
-
-다만 Terraform root/state 분리와 Seed/Ingest project 생성은, 1번(GCS/Firestore 연동)을 실제 GCP 리소스 위에서 구현하기 위한 선행 준비로 먼저 진행했다.
+즉 지금 당장 해야 할 핵심은 이미 구현한 Ingest 데이터 흐름을 목표 경로와 배포 설정으로 정리하고, 실제 GCP 환경에서 경계가 독립적으로 동작하는지 검증하는 것이다. Intelligence와 Serving 구현은 이 기반이 확정된 뒤 파일 단위로 진행한다.
 
 ---
 
@@ -795,31 +826,34 @@ SQL로 표현하기 어려운 LLM/embedding/model 워크로드인가?
 
 ## 13. 코드 디렉토리 구조
 
-Intelligence는 SQL 네이티브 채택 시 Dataform SQL과 Terraform 리소스로만 구성되고 별도 Python 코드가 거의 없다. 따라서 `src/` 아래에는 Ingest, Serving, 그리고 둘의 공통 유틸을 담는 `core`만 존재한다.
+Intelligence는 SQL 네이티브 채택 시 Dataform SQL과 Terraform 리소스로만 구성되고 별도 Python 코드가 거의 없다. 따라서 `src/` 아래에는 Ingest, Serving, 설정 package, 그리고 공통 유틸을 담는 `core`가 존재한다.
 
 ```text
 src/
-  core/                # 기존 그대로 유지 — Ingest/Serving 공통 인프라 유틸
+  config/
     config.py
+
+  core/                # Ingest/Serving 공통 런타임 유틸
     logger.py
     transient.py
 
   ingest/              # 기존 worker/ 대체
     main.py
-    dependencies.py    # source_semaphore, StorageProvider, FirestoreProvider 주입
-    routers/
-    services/
+    dependencies.py    # enrich_semaphore, StorageProvider, FirestoreProvider 주입
+    router.py
+    service.py
     plugins/
-      source.py
+      rss.py
       sources/
-      stores/          # gcs.py, firestore.py (BigQuery 기반 BronzeStore 대체)
+        yahoo_finance.py
+        cnbc.py
     providers/
       storage.py
       firestore.py
     models/
-      entities/
-        news.py
-      schemas/
+      news.py
+      ingest.py
+      sources/
 
   serving/             # 기존 api/ 대체
     main.py
@@ -837,9 +871,9 @@ src/
 
 ```text
 - "shared"라는 새 이름을 만들지 않는다. 기존 src/core/가 이미 공통 유틸 역할이므로 그대로 확장한다.
-- core에는 Ingest/Serving이 동일하게 쓰는 것(설정 로딩, 로거, transient 판별)만 남긴다.
-- BigQueryProvider/GeminiProvider처럼 service별 provider 의존성은 core/dependencies.py가 아니라 각 서비스의 dependencies.py로 옮긴다.
+- 설정은 src/config/에 유지하고, core에는 Ingest/Serving이 동일하게 쓰는 로거·transient 판별 등만 남긴다.
+- service별 provider 의존성은 core/dependencies.py가 아니라 각 서비스의 dependencies.py로 옮긴다.
 - Intelligence 전용 src/ 디렉토리는 미리 만들지 않는다. Cloud Run fallback(3c)이 실제로 채택될 때만 src/intelligence/를 새로 만든다.
 ```
 
-`src/worker/` → `src/ingest/`, `src/api/` → `src/serving/` 리네이밍은 코드 경로뿐 아니라 `Dockerfile`, `cloudbuild.yml`의 이미지/서비스 이름, uvicorn 실행 경로(`src.worker.main:app` 등), Terraform Cloud Run 리소스 이름에도 함께 반영한다.
+`src/worker/` → `src/ingest/` 이동, Ingest 내부 책임 경계와 `Dockerfile`, `cloudbuild.yml`의 실행 경로 전환은 완료했다. `src/serving/`은 Serving 구현을 시작할 때 만들고, Terraform Cloud Run·Scheduler 리소스와 인증 주체는 Phase 1의 남은 작업으로 구성한다.
