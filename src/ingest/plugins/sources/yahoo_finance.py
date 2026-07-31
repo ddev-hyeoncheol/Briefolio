@@ -6,7 +6,7 @@ from src.ingest.plugins.rss import RssPlugin
 
 
 class YahooFinanceSource(RssPlugin):
-    """News source for Yahoo Finance RSS feed with source-specific boilerplate support."""
+    """RSS source for fetching and mapping Yahoo Finance news."""
 
     @property
     def source(self) -> str:
@@ -30,7 +30,6 @@ class YahooFinanceSource(RssPlugin):
 
     @property
     def boilerplate_contents(self) -> dict[str, str]:
-        """Return known Yahoo Finance non-article boilerplates keyed by diagnostic name."""
         return {
             "yahoo_login": "Sign in to access your portfolio\n\nSign in",
             "coinbase_ad": (

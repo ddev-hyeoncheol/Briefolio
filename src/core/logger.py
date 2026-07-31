@@ -7,7 +7,6 @@ from src.config.config import settings
 _IS_GCP = settings.is_gcp
 _LOG_LEVEL = settings.log_level.upper()
 
-# Python level to GCP severity mapping.
 _SEVERITY_MAP = {
     logging.DEBUG: "DEBUG",
     logging.INFO: "INFO",
@@ -16,7 +15,6 @@ _SEVERITY_MAP = {
     logging.CRITICAL: "CRITICAL",
 }
 
-# Local plain-text format.
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 _LOCAL_FORMAT = "[%(asctime)s] %(levelname)-8s : %(name)s - %(message)s"
 
@@ -84,12 +82,5 @@ def configure_uvicorn_loggers() -> None:
 
 
 def get_logger(name: str) -> logging.Logger:
-    """
-    Return a logger with the given name.
-
-    Usage:
-        from src.core.logger import get_logger
-        logger = get_logger(__name__)
-        logger.info("IngestService ingest completed | count: %d", len(items))
-    """
+    """Return a logger with the given name."""
     return logging.getLogger(name)

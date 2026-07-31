@@ -1,6 +1,5 @@
 import http
 
-# Transient HTTP statuses that can succeed on a later attempt.
 TRANSIENT_HTTP_STATUS_CODES = {
     http.HTTPStatus.TOO_MANY_REQUESTS,  # 429
     http.HTTPStatus.INTERNAL_SERVER_ERROR,  # 500

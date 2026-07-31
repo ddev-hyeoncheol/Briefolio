@@ -6,7 +6,7 @@ from src.ingest.plugins.rss import RssPlugin
 
 
 class CnbcSource(RssPlugin):
-    """News source for CNBC RSS feed with source-specific boilerplate support."""
+    """RSS source for fetching and mapping CNBC news."""
 
     @property
     def source(self) -> str:
@@ -30,7 +30,6 @@ class CnbcSource(RssPlugin):
 
     @property
     def boilerplate_contents(self) -> dict[str, str]:
-        """Return known CNBC non-article boilerplates keyed by diagnostic name."""
         return {}
 
     async def run_fetch(self, executed_at: datetime) -> list[NewsModel]:

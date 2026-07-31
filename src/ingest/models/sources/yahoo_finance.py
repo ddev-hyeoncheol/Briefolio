@@ -40,7 +40,7 @@ class YahooFinanceEntrySchema(BaseModel):
 
     title: str = Field(description="RSS-provided news item title")
     link: str = Field(description="RSS-provided news item URL")
-    published_parsed: list[int] | tuple[int, ...] = Field(description="RSS-provided publication timestamp structure")
+    published_parsed: list[int] | tuple[int, ...] = Field(description="Parsed RSS publication timestamp components")
     original_source: YahooFinanceOriginalSourceSchema | None = Field(
         default=None, alias="source", description="RSS-provided original source metadata"
     )

@@ -13,7 +13,7 @@ logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage Ingest application startup and shutdown."""
+    """Create and close shared Ingest application resources."""
     configure_uvicorn_loggers()
 
     # Create the shared enrich semaphore here so it is bound to the correct event loop.
@@ -40,13 +40,13 @@ app.include_router(router)
 
 @app.get("/")
 async def root():
-    """Return a welcome message."""
+    """Return the Ingest application welcome message."""
     return {"message": "Welcome to Briefolio Ingest App"}
 
 
 @app.get("/health")
 async def health_check():
-    """Return health status for Cloud Run and Load Balancers to verify service availability."""
+    """Return the Ingest application health status."""
     return {"status": "healthy", "version": "1.0.0"}
 
 

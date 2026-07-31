@@ -16,10 +16,10 @@ class CnbcEntrySchema(BaseModel):
     link: str = Field(description="RSS-provided news item URL")
     id: str | None = Field(default=None, description="RSS-provided raw entry identifier")
     metadata_type: str | None = Field(default=None, description="RSS-provided CNBC content type")
-    metadata_sponsored: str | None = Field(default=None, description="RSS-provided CNBC sponsored flag")
+    metadata_sponsored: str | None = Field(default=None, description="RSS-provided CNBC sponsorship indicator")
     title: str = Field(description="RSS-provided news item title")
     summary: str | None = Field(default=None, description="RSS-provided news item summary")
-    published_parsed: list[int] | tuple[int, ...] = Field(description="RSS-provided publication timestamp structure")
+    published_parsed: list[int] | tuple[int, ...] = Field(description="Parsed RSS publication timestamp components")
 
     model_config = ConfigDict(
         extra="ignore",

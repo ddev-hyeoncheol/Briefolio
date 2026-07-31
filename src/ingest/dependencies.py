@@ -7,12 +7,11 @@ from src.ingest.providers.firestore import FirestoreProvider
 from src.ingest.providers.storage import CloudStorageProvider
 from src.ingest.service import IngestService
 
-# Registry of enabled news source classes. Add a source class here to activate it.
 ENABLED_SOURCE_CLASSES: tuple[type[RssPlugin], ...] = (YahooFinanceSource,)
 
 
 def get_ingest_service(request: Request) -> IngestService:
-    """Provide the IngestService assembled from shared application resources."""
+    """Return an IngestService assembled from shared application resources."""
     source_plugins = [
         source_cls(enrich_semaphore=request.app.state.enrich_semaphore) for source_cls in ENABLED_SOURCE_CLASSES
     ]

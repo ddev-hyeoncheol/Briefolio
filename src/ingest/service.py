@@ -11,12 +11,12 @@ from src.ingest.plugins.rss import RssPlugin
 from src.ingest.providers.firestore import FirestoreProvider
 from src.ingest.providers.storage import CloudStorageProvider
 
-# Firestore collection holding per-URL dedup state documents (TRANSITION.md 3.1).
+# Shared collection for entry and canonical URL deduplication state.
 NEWS_STATE_COLLECTION = "news_state"
 
 
 class IngestService:
-    """Ingest service that fetches news from sources and loads the raw bucket."""
+    """Service that orchestrates source ingestion, deduplication, raw loading, and state recording."""
 
     def __init__(
         self,
@@ -24,13 +24,12 @@ class IngestService:
         firestore_provider: FirestoreProvider,
         storage_provider: CloudStorageProvider,
     ) -> None:
-        """Initialize the ingest service with required source plugins and providers."""
         self.source_plugins = source_plugins
         self.firestore_provider = firestore_provider
         self.storage_provider = storage_provider
 
     async def run(self, executed_at: datetime) -> IngestResponse:
-        """Fetch news from all sources and load to the raw bucket."""
+        """Run all source pipelines and aggregate their results."""
         executed_at = self._resolve_executed_at(executed_at=executed_at)
         # Each invocation is an independent append-only capture, so duplicate or
         # replayed invocations never overwrite an earlier capture's files.
@@ -68,26 +67,24 @@ class IngestService:
         )
 
     async def _run_source(self, source_plugin: RssPlugin, executed_at: datetime, run_id: str) -> IngestSourceResult:
-        """Process a single source pipeline from RSS fetch to raw bucket load."""
+        """Run the complete Ingest pipeline for one source."""
         source = source_plugin.source
         started_at = datetime.now(tz=timezone.utc)
         current_phase: IngestPhase = "fetch"
 
         try:
-            # 1. Fetch
             current_phase = "fetch"
             fetch_items = await source_plugin.run_fetch(executed_at=executed_at)
 
-            # 2. Entry lookup (news_id equals entry_key before enrich)
+            # Before enrichment, news_id and entry_key identify the same RSS URL.
             current_phase = "entry_lookup"
             entry_retryable_items = await self._filter_retryable(items=fetch_items, key="entry_key")
 
-            # 3. Enrich
             current_phase = "enrich"
             enriched_items = await source_plugin.run_enrich(items=entry_retryable_items)
             deduplicated_items, grouped_items = self._deduplicate_enriched_items(items=enriched_items)
 
-            # 4. News lookup: only items whose canonical URL moved the key need a fresh check.
+            # Only canonical URLs that changed the key need a second lookup.
             current_phase = "news_lookup"
             rekeyed_items = [item for item in deduplicated_items if item.news_id != item.entry_key]
             news_retryable_items = await self._filter_retryable(items=rekeyed_items, key="news_id")
@@ -100,7 +97,6 @@ class IngestService:
             duplicate_items = [item for item in deduplicated_items if item.news_id in duplicate_keys]
             final_items = [item for item in deduplicated_items if item.news_id not in duplicate_keys]
 
-            # Detect item-level enrich failures among the items this run will load.
             has_enrich_failure = any(item.status != "success" for item in final_items)
             if duplicate_items:
                 duplicate_states: dict[str, dict] = {}
@@ -117,12 +113,10 @@ class IngestService:
                     states=duplicate_states,
                 )
 
-            # 5. Load
             current_phase = "load"
             await self._load_news(source=source, executed_at=executed_at, run_id=run_id, items=final_items)
 
-            # 6. State write: runs only after a successful load, so absent state records
-            # always mean the next invocation retries these items.
+            # Write state only after a successful load so failed captures remain retryable.
             current_phase = "state_write"
             if final_items:
                 states: dict[str, dict] = {}
@@ -176,7 +170,7 @@ class IngestService:
         run_id: str,
         items: Sequence[NewsModel],
     ) -> None:
-        """Upload a JSONL capture and its manifest to the raw bucket (TRANSITION.md 3.2)."""
+        """Upload a JSONL capture and its manifest to the raw bucket."""
         # Segments follow containment: a slot holds invocations, an invocation holds
         # per-source captures. Date/hour scans use executed_at value prefixes.
         partition = f"executed_at={executed_at.strftime('%Y%m%dT%H%M%SZ')}/run_id={run_id}"
@@ -237,7 +231,7 @@ class IngestService:
         return list(selected_items.values()), grouped_items
 
     def _create_state_doc(self, item: NewsModel, url: str, executed_at: datetime, status: str) -> dict:
-        """Return a news_state document payload for the given URL key."""
+        """Return a news_state document payload for the given URL."""
         doc: dict = {
             "status": status,
             "url": url,

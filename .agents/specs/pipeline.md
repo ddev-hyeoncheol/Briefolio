@@ -23,7 +23,7 @@
 
 ## Results And Failure
 
-- source `count`는 성공/실패를 포함해 JSONL 적재 대상으로 확정된 item 수입니다.
+- source `count`는 phase 예외 없이 실행을 마친 경우 성공/실패를 포함한 JSONL record 수이고, phase 예외로 `failed`가 되면 0입니다. 전체 `count`는 source `count`의 합입니다.
 - source 실행이 끝났을 때 load 대상에 `failed` item이 있으면 status는 `partial`, 없으면 `success`입니다.
 - phase 예외는 source status를 `failed`로 만들고 현재 phase와 오류를 응답에 남깁니다.
 - Load 또는 State Write 실패 시 최종 state가 없는 item은 다음 호출에서 다시 처리될 수 있으며, 이미 올라간 raw object의 중복은 허용합니다.

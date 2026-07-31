@@ -4,20 +4,18 @@ from typing import Any
 
 from google.cloud import firestore
 
-# State documents expire after this window, mirroring the legacy BigQuery
-# 7-day retry lookup window (TRANSITION.md 3.1).
+# Populate the expiration field used when Firestore TTL enforcement is enabled.
 STATE_TTL = timedelta(days=7)
 
 
 class FirestoreProvider:
-    """Thin wrapper around the Firestore async client for dedup state storage."""
+    """Provider for reading and writing ingestion deduplication state in Firestore."""
 
     def __init__(self, client: firestore.AsyncClient) -> None:
-        """Initialize the provider with a Firestore async client."""
         self.client = client
 
     async def get_statuses(self, collection: str, doc_ids: Sequence[str]) -> dict[str, str | None]:
-        """Return the latest status for each doc_id in the collection, or None if the document doesn't exist."""
+        """Return each document's stored status, or None when the document does not exist."""
         if not doc_ids:
             return {}
 
@@ -29,7 +27,7 @@ class FirestoreProvider:
         return statuses
 
     async def set_states(self, collection: str, states: Mapping[str, Mapping[str, Any]]) -> None:
-        """Overwrite each doc_id's state document with an appended TTL expiration timestamp."""
+        """Overwrite state documents after adding a shared TTL expiration timestamp."""
         if not states:
             return
 

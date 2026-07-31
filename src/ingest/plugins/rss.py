@@ -22,13 +22,7 @@ _retry = retry(
 
 
 class RssPlugin(ABC):
-    """
-    Abstract base for RSS-backed news source implementations.
-
-    Provides shared utilities and coordinates external news collection:
-    - run_fetch(): Source-specific RSS parsing and field mapping.
-    - run_enrich(): Standardized parallel scraping with per-item error isolation.
-    """
+    """Abstract plugin for RSS fetching and article enrichment."""
 
     @property
     @abstractmethod
@@ -68,7 +62,6 @@ class RssPlugin(ABC):
         return {}
 
     def __init__(self, enrich_semaphore: asyncio.Semaphore) -> None:
-        """Initialize with a shared semaphore to limit concurrent enrich requests."""
         self._enrich_semaphore = enrich_semaphore
         self._user_agent = settings.user_agent
         self._newspaper_config = newspaper.Config()
@@ -118,7 +111,6 @@ class RssPlugin(ABC):
                         else "Content unavailable::empty content"
                     )
 
-            # Dump enriched schema properties directly and overlay normalized enrichment fields and diagnostics.
             update_fields = enriched.model_dump(exclude={"status_code", "error_message"})
             update_fields.update(
                 {
@@ -157,14 +149,7 @@ class RssPlugin(ABC):
         return feed
 
     async def _enrich_article(self, url: str) -> ArticleEnrichmentSchema:
-        """
-        Fetch and parse full article content for a single URL.
-
-        Use httpx for async I/O to get status_code and HTML,
-        then use newspaper4k for CPU-bound text extraction.
-        Return an ArticleEnrichmentSchema with extracted article fields and diagnostics.
-        Limit concurrent requests across all sources using the shared semaphore.
-        """
+        """Fetch and parse one article while preserving item-level diagnostics."""
         status_code, html, error_message = await self._fetch_html(url)
 
         if status_code == 200 and html:
@@ -190,7 +175,6 @@ class RssPlugin(ABC):
                     response = await client.get(url, headers={"User-Agent": self._user_agent}, timeout=10.0)
                     return response.status_code, response.text, None
         except Exception as e:
-            # Network error or unexpected exception before receiving an HTTP response.
             return None, None, f"Network error::{type(e).__name__}::{e}"
 
     def _parse_article_html(self, url: str, html: str) -> ArticleEnrichmentSchema:

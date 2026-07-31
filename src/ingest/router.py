@@ -22,10 +22,9 @@ async def run_ingest(
     response: Response,
     ingest_service: IngestService = Depends(get_ingest_service),
 ) -> IngestResponse:
-    """Run the news ingestion batch."""
+    """Run the Ingest pipeline."""
     result = await ingest_service.run(executed_at=request.executed_at)
 
-    # Map execution status to the HTTP status code.
     if result.status == "failed":
         response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
     elif result.status == "partial":

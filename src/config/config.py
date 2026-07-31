@@ -12,19 +12,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Application HTTP port. Cloud Run provides PORT; local runs use the same default.
+    # Cloud Run injects PORT; local runs default to 8080.
     port: int = 8080
 
-    # Application log level.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
     # Cloud Run automatically sets K_SERVICE; use it to detect GCP environment.
     k_service: str | None = None
 
-    # Cloud Storage bucket for raw data (TRANSITION.md 3.2).
     raw_bucket_name: str = "briefolio-ingest-raw"
 
-    # HTTP User-Agent header used for RSS feed fetching and scraping.
     user_agent: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -32,7 +29,7 @@ class Settings(BaseSettings):
 
     @property
     def is_gcp(self) -> bool:
-        """Return True if the application is running on GCP (Cloud Run)."""
+        """Return whether the Cloud Run K_SERVICE environment variable is present."""
         return self.k_service is not None
 
 

@@ -10,7 +10,7 @@ class ArticleEnrichmentSchema(BaseModel):
     - images, movies: High storage cost, low analytical value.
     - publish_date: Redundant with RSS `published_at` timestamp.
     - meta_description, meta_keywords, meta_data: Redundant or noisy parser metadata.
-    - keywords, summary: Redundant parser metadata.
+    - keywords, summary: Derived article outputs not collected by ingest.
     """
 
     authors: str | None = Field(default=None, description="HTML-extracted pipe-delimited author names")
@@ -18,8 +18,8 @@ class ArticleEnrichmentSchema(BaseModel):
     image_url: str | None = Field(default=None, description="HTML-extracted representative image URL")
     language: str | None = Field(default=None, description="HTML-declared language code")
     content: str | None = Field(default=None, description="HTML-extracted article body text")
-    status_code: int | None = Field(default=None, description="Item HTTP status code")
-    error_message: str | None = Field(default=None, description="Item error message")
+    status_code: int | None = Field(default=None, description="Article fetch HTTP status code")
+    error_message: str | None = Field(default=None, description="HTML enrichment error message")
 
     model_config = ConfigDict(
         extra="ignore",

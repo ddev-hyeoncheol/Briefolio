@@ -12,7 +12,10 @@ class IngestRequest(BaseModel):
 
     executed_at: AwareDatetime = Field(
         default_factory=lambda: datetime.now(tz=timezone.utc),
-        description="Requested ingest execution time. Defaults to current UTC time if not provided.",
+        description=(
+            "Requested execution time before 10-minute UTC slot normalization; "
+            "defaults to the current UTC time."
+        ),
     )
 
 
@@ -20,17 +23,17 @@ class IngestSourceResult(BaseModel):
     """Response payload for a single news source execution."""
 
     source: str = Field(
-        description="News source name.",
+        description="News source identifier.",
     )
     executed_at: AwareDatetime = Field(
-        description="Normalized ingest execution time (UTC).",
+        description="Normalized 10-minute UTC ingest execution slot.",
     )
     status: IngestStatus = Field(
         description="Status of this source execution.",
     )
     count: int = Field(
         default=0,
-        description="Number of news items loaded by this source execution.",
+        description="Number of records reported for a source execution without a phase-level failure.",
     )
     started_at: AwareDatetime | None = Field(
         default=None,
@@ -58,7 +61,7 @@ class IngestResponse(BaseModel):
     """Response payload for an ingest execution."""
 
     executed_at: AwareDatetime = Field(
-        description="Normalized ingest execution time (UTC).",
+        description="Normalized 10-minute UTC ingest execution slot.",
     )
     run_id: str = Field(
         description="Unique identifier of this invocation, used as the capture path segment.",
@@ -68,7 +71,7 @@ class IngestResponse(BaseModel):
     )
     count: int = Field(
         default=0,
-        description="Total number of news items loaded across all sources.",
+        description="Total records reported by source executions without phase-level failures.",
     )
     started_at: AwareDatetime | None = Field(
         default=None,
