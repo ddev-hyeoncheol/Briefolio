@@ -1,11 +1,7 @@
-# Docker build context allowlist: exclude everything, re-include only
-# what the build needs, then re-exclude generated files.
+# Docker build context allowlist.
 
 *
 
 !requirements.txt
 !src/
 !src/**
-
-src/**/__pycache__/
-src/**/*.py[cod]
