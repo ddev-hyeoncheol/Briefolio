@@ -35,9 +35,13 @@ resource "google_cloud_run_v2_service" "app" {
     percent = 100
   }
 
-  # Cloud Build owns post-creation image updates; Terraform preserves them during in-place updates.
+  # Cloud Build owns image updates, and gcloud records deployment client metadata with each update.
   lifecycle {
-    ignore_changes = [template[0].containers[0].image]
+    ignore_changes = [
+      client,
+      client_version,
+      template[0].containers[0].image,
+    ]
   }
 
   depends_on = [google_project_service.run]

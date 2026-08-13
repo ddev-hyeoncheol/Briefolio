@@ -12,7 +12,7 @@ steps:
       - push
       - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REPOSITORY}/${_IMAGE_NAME}:${COMMIT_SHA}
 
-  # Terraform delegates only the Cloud Run image field to this deployment step.
+  # Terraform delegates the image field and ignores the client metadata recorded by gcloud.
   - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
     entrypoint: gcloud
     args:
