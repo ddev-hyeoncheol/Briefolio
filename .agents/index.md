@@ -1,74 +1,33 @@
 # Agent Harness Index
 
-현재 작업에 필요한 하네스 문서만 골라 읽기 위한 인덱스입니다.
-
-## Always
-
-항상 다음 파일을 읽습니다.
-
-- `.agents/rules/core.md`
-
 ## Workflows
 
-리뷰 요청이면 다음 파일을 읽습니다.
-
-- `.agents/workflows/review.md`
-
-동작 변경 없는 코드 구조 개선이나 청소이면 다음 파일을 읽습니다.
-
-- `.agents/workflows/refactor.md`
-
-리팩토링이 파일 수정을 포함하면 다음 파일도 함께 읽습니다.
-
-- `.agents/workflows/implement.md`
-
-기능 추가, 버그 수정, 문서 변경처럼 동작이나 산출물이 바뀌는 작업이면 다음 파일을 읽습니다.
-
-- `.agents/workflows/implement.md`
-
-## Guides
-
-새 뉴스 source 추가이면 다음 파일을 읽습니다.
-
-- `.agents/guides/news-source.md`
+- 리뷰 요청이면 `.agents/workflows/review.md`를 읽습니다.
+- 기능 추가·버그 수정·리팩토링·문서 변경처럼 파일을 수정하는 작업이면 `.agents/workflows/implement.md`를 읽습니다.
 
 ## Context
 
-현재 포커스, 임시 결정 등 동적 상태가 작업 결과에 직접 영향을 주는 경우 다음 파일을 읽습니다.
+- 현재 포커스·임시 결정 등 동적 상태가 작업에 직접 영향을 주면 `MEMORY.md`를 읽습니다.
+- 기술 부채가 작업 대상이면 `DEBT.md`를 읽습니다.
+- 진행 중인 아키텍처 전환이나 로드맵이 작업 대상이면 `TRANSITION.md`를 읽습니다.
 
-- `MEMORY.md`
+## Domain Spec
 
-기술 부채 파악 및 아키텍처 리팩토링 검토 시 다음 파일을 읽습니다.
-
-- `DEBT.md`
-- `TRANSITION.md`
-
-## Domain Rules
-
-아키텍처, 레이어 책임, target, Provider 변경이면 다음 파일을 읽습니다.
-
-- `.agents/rules/architecture.md`
-
-Batch pipeline, bronze/silver, count, 실패 전파 변경이면 다음 파일을 읽습니다.
-
-- `.agents/rules/pipeline.md`
-
-Entity, Schema, BigQuery, Terraform, field description 변경이면 다음 파일을 읽습니다.
-
-- `.agents/rules/data-contract.md`
+- 아키텍처·레이어 책임·API·Provider 중 하나가 작업 대상이면 `.agents/specs/architecture.md`를 읽습니다.
+- Ingest pipeline·dedup·count·실패 전파 중 하나가 작업 대상이면 `.agents/specs/pipeline.md`를 읽습니다.
+- Entity·Schema·raw JSONL·Firestore 문서·field description 중 하나가 작업 대상이면 `.agents/specs/data-contract.md`를 읽습니다.
 
 ## Cross-Cutting Rules
 
-import, method order, docstring, comment, logging 변경이면 다음 파일을 읽습니다.
+- Python import·naming·멤버 순서 중 하나가 작업 대상이면 `.agents/rules/style.md`를 읽습니다.
+- docstring·comment·Field description 중 하나가 작업 대상이면 `.agents/rules/comments.md`를 읽습니다.
 
-- `.agents/rules/style.md`
+## Guides
+
+- 새 뉴스 source 추가이면 `.agents/guides/news-source.md`를 읽습니다.
 
 ## Special Rules
 
-하네스 문서 추가/수정/리뷰/검토이면 다음 파일을 읽습니다.
-
-- `.agents/rules/harness-doc.md`
-
-commit 요청이면 다음 파일을 읽습니다.
-
-- `.agents/rules/commit.md`
+- 하네스 문서가 작업 대상이면 `.agents/rules/harness-doc.md`를 읽습니다.
+- commit 요청이면 `.agents/rules/commit.md`를 읽습니다.
+- branch·pull request가 작업 대상이면 `CONTRIBUTING.md`를 읽습니다.

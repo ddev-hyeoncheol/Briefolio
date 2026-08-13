@@ -1,0 +1,33 @@
+steps:
+  # Use the triggering commit SHA as the shared image tag across build, push, and deployment.
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - build
+      - --tag
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REPOSITORY}/${_IMAGE_NAME}:${COMMIT_SHA}
+      - .
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REPOSITORY}/${_IMAGE_NAME}:${COMMIT_SHA}
+
+  # Terraform delegates only the Cloud Run image field to this deployment step.
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - run
+      - services
+      - update
+      - ${_SERVICE_NAME}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_ARTIFACT_REPOSITORY}/${_IMAGE_NAME}:${COMMIT_SHA}
+      - --region=${_REGION}
+      - --project=${PROJECT_ID}
+      - --quiet
+
+# A user-specified build service account requires an explicit logging destination.
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+# Limit the complete build to 20 minutes to constrain execution cost.
+timeout: 1200s

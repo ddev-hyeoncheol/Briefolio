@@ -1,19 +1,7 @@
 # Docker build context allowlist.
-#
-# Exclude everything, re-include Docker build inputs, then exclude
-# generated and local-only files that Docker would otherwise keep.
 
-# Exclude everything by default.
 *
 
-# Docker build inputs.
-!Dockerfile
 !requirements.txt
 !src/
 !src/**
-
-# Keep generated or local-only files out after re-including `src/`.
-src/**/__pycache__/
-src/**/*.py[cod]
-src/**/*.egg-info/
-src/simple_test.py
