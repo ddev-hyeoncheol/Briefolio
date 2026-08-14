@@ -19,6 +19,7 @@
 
 ## Cross-Cutting Rules
 
+- Terraform·GCP 인프라·IAM·state·plan·apply·destroy 중 하나가 작업 대상이면 `.agents/rules/terraform.md`를 읽습니다.
 - Python import·naming·멤버 순서 중 하나가 작업 대상이면 `.agents/rules/style.md`를 읽습니다.
 - docstring·comment·Field description 중 하나가 작업 대상이면 `.agents/rules/comments.md`를 읽습니다.
 

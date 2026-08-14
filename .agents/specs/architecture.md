@@ -13,7 +13,9 @@
 | Provider | `src/ingest/providers/` | 주입받은 Firestore와 Cloud Storage client 호출 |
 | Model | `src/ingest/models/` | raw entity, API DTO, source DTO 계약 |
 | Core / Config | `src/core/`, `src/config/` | 공통 logging, transient 판정, runtime 설정 |
-| Infrastructure | `terraform/{ingest,intelligence,serving}/`, `cloudbuild/` | 프로젝트별 state root와 GCP 배포 설정 |
+| Infrastructure | `terraform/{ingest,intelligence,serving}/`, `cloudbuild.yaml` | 프로젝트별 state root와 GCP 배포 설정 |
+
+- 인프라 소유권, state, 삭제 정책은 `.agents/rules/terraform.md`를 따릅니다.
 
 ## Transition Boundary
 
