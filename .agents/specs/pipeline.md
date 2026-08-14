@@ -27,4 +27,4 @@
 - source 실행이 끝났을 때 load 대상에 `failed` item이 있으면 status는 `partial`, 없으면 `success`입니다.
 - phase 예외는 source status를 `failed`로 만들고 현재 phase와 오류를 응답에 남깁니다.
 - Load 또는 State Write 실패 시 최종 state가 없는 item은 다음 호출에서 다시 처리될 수 있으며, 이미 올라간 raw object의 중복은 허용합니다.
-- `expires_at`은 기록 시각부터 7일 뒤이며 Firestore TTL 활성화 전 상태는 `DEBT.md`에서 추적합니다.
+- `expires_at`은 기록 시각부터 7일 뒤이며 Firestore TTL 정책이 만료된 state 문서를 삭제합니다.

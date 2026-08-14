@@ -14,9 +14,9 @@
 
 ### [Deployment] Terraform Apply Trigger Separation
 
-- **설명**: 로컬에서 `terraform plan`을 확인한 뒤 push하더라도, push trigger에서 `terraform apply`까지 자동 실행하면 Cloud Build 실행 시점의 원격 state, 권한, provider 환경 차이를 다시 확인하지 못합니다.
-- **영향**: 실수로 push된 Terraform 변경이나 원격 state 차이가 즉시 GCP 인프라에 반영되어 BigQuery schema, 리소스, 비용 변경이 의도보다 빠르게 적용될 수 있습니다.
-- **해결 방안**: 자동 push trigger는 `terraform init`, `terraform validate`, `terraform plan`까지 실행하고, `terraform apply`는 Cloud Build 수동 trigger 또는 plan 출력 확인 후 승인 단계로 분리합니다.
+- **설명**: 기존 `cloudbuild.terraform.yml`은 `terraform apply`까지 자동 실행하도록 구성되어 있어, push 시점에 원격 state 차이나 의도치 않은 인프라 변경이 즉시 반영될 위험이 있었습니다. 레거시 단일 프로젝트 파일 정리 시 해당 파일을 제거하여 자동 apply 실행 경로를 차단했습니다.
+- **영향**: 향후 Terraform CI/CD 워크플로 구축 시 자동 apply가 실행되면 BigQuery schema, 리소스, 비용 변경이 예기치 않게 적용될 수 있습니다.
+- **해결 방안**: 레거시 `cloudbuild.terraform.yml`은 제거 완료되었습니다. 향후 경계별(`terraform/{ingest,intelligence,serving}`) CI 트리거는 `terraform init`, `terraform validate`, `terraform plan`까지만 실행합니다. `terraform apply`와 `terraform destroy`는 Cloud Build trigger에 포함하지 않고 사용자가 plan을 검토한 뒤 직접 실행합니다.
 
 ## Data Contract & Ingestion
 
@@ -28,15 +28,9 @@
 
 ### [Data Safety] Ingest Deletion Guards Disabled
 
-- **설명**: 개발 중 리소스 재생성을 쉽게 하려고 `terraform/ingest`의 삭제 방지를 의도적으로 비활성화했습니다. Firestore는 `delete_protection_state` 미설정과 `deletion_policy = "DELETE"`, GCS 버킷은 `force_destroy = true`로 구성되어 있습니다.
+- **설명**: 개발 중 리소스 재생성을 쉽게 하려고 `terraform/ingest`의 삭제 방지를 의도적으로 비활성화했습니다. Firestore는 `delete_protection_state = "DELETE_PROTECTION_DISABLED"`와 `deletion_policy = "DELETE"`, GCS 버킷은 `force_destroy = true`로 구성되어 있습니다.
 - **영향**: `terraform destroy`나 리소스 블록 삭제처럼 삭제를 유발하는 모든 경로가 데이터까지 포함해 막힘없이 실행됩니다. 지금은 두 저장소 모두 비어 있어 무해하지만, 실제 `news_state` 문서와 raw JSONL이 쌓이기 시작하면 실수로 인한 전체 데이터 손실 위험이 생깁니다.
-- **해결 방안**: 파이프라인이 실제로 운영되어 의미 있는 데이터가 쌓이기 시작하면 Firestore에는 `delete_protection_state = "DELETE_PROTECTION_ENABLED"`를 다시 추가하고(`deletion_policy`는 그대로 둬도 protection이 실제 삭제를 막습니다), 버킷에서는 `force_destroy`를 제거해 기본값(false)으로 되돌립니다.
-
-### [Data Lifecycle] Firestore TTL Policy Not Configured
-
-- **설명**: `FirestoreProvider.set_states()`는 `expires_at`(작성 시각 + 7일)을 기록하지만, Terraform에 `news_state`의 `expires_at`에 대한 `google_firestore_field` + `ttl_config` 선언이 없어 TTL 삭제가 활성화되지 않은 상태입니다. TTL 구성은 나중에 작업하기로 의도적으로 미뤘습니다.
-- **영향**: 만료된 문서가 자동 삭제되지 않습니다. dedup 정확성은 유지되지만(성공한 문서는 재처리할 이유가 없음), success 문서가 무한히 쌓여 저장 비용이 계속 증가하고 7일 보존 창 설계가 동작하지 않습니다.
-- **해결 방안**: 운영 시작 시점에 `terraform/ingest/firestore.tf`에 `news_state` collection의 `expires_at` 필드에 대한 `google_firestore_field` + `ttl_config {}` 리소스를 추가합니다. 애플리케이션은 이미 `expires_at`을 기록하고 있어 추가 코드 변경은 필요 없습니다.
+- **해결 방안**: 파이프라인이 실제로 운영되어 의미 있는 데이터가 쌓이기 시작하면 Firestore에는 `delete_protection_state`를 `DELETE_PROTECTION_ENABLED`로 변경하고(`deletion_policy`는 그대로 둬도 protection이 실제 삭제를 막습니다), 버킷에서는 `force_destroy`를 제거해 기본값(false)으로 되돌립니다.
 
 ## Testing & Verification
 
