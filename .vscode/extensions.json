@@ -6,6 +6,6 @@
     "ms-pyright.pyright",
     "editorconfig.editorconfig",
     "eamodio.gitlens",
-    "4ops.terraform"
+    "hashicorp.terraform"
   ]
 }
