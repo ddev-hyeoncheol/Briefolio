@@ -19,7 +19,7 @@
 
 ## Firestore Documents
 
-- **[CRITICAL]** 브랜드 전환만으로 `make_url_id()`의 namespace seed(`gemini-news-brief`)나 URL 정규화 규칙을 바꾸지 않습니다. 변경은 기존 dedup state 전체의 migration 승인을 받은 경우에만 수행합니다.
+- **[CRITICAL]** Firestore state 기록을 시작한 뒤에는 `make_url_id()`의 namespace seed(`Briefolio`)나 URL 정규화 규칙을 바꾸지 않습니다. 변경하면 기존 dedup 문서 키와 호환되지 않습니다.
 - `news_state` 문서 키는 entry 또는 canonical URL에 `make_url_id()`를 적용한 UUID만 사용합니다.
 - 문서는 `{status, url, source, executed_at, expires_at[, error_message]}` 전체 덮어쓰기로 기록하며 merge를 사용하지 않습니다.
 - `status`는 `success` 또는 `failed`이고, `error_message`는 실패 원인이 있을 때만 기록합니다.

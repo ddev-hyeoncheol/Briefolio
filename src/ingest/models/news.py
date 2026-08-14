@@ -4,7 +4,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, computed_field
 
-_NAMESPACE_UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "gemini-news-brief")
+_NAMESPACE_UUID = uuid.uuid5(uuid.NAMESPACE_DNS, "Briefolio")
 
 
 def make_url_id(url: str) -> str:
