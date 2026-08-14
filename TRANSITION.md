@@ -2,10 +2,9 @@
 
 ## Project Identity
 
-- 제품 표시 이름은 `Briefolio`입니다.
+- 제품 표시 이름과 저장소 이름은 `Briefolio`입니다.
 - 저장소 및 리소스에 사용하는 기술 식별자는 `briefolio`입니다.
-- 기존 `Gemini News Brief` 명칭은 전환 과정에서 순차적으로 제거합니다.
-- 단, `make_url_id()`의 namespace seed `gemini-news-brief`는 기존 Firestore dedup 키 호환성을 위해 유지합니다.
+- `make_url_id()`의 namespace seed는 `Briefolio`이며 Firestore state 기록을 시작한 뒤에는 변경하지 않습니다.
 - 프로젝트 이름은 특정 AI provider나 저장 계층을 포함하지 않습니다.
 - `Briefolio Intelligence`는 기존 Warehouse와 Enrichment 책임을 하나의 경계로 통합합니다.
 
@@ -156,6 +155,92 @@ Ingest는 다음 조건을 만족하면 완료된 것으로 본다.
 ```
 
 현재 코드에는 Firestore 중복 필터, GCS JSONL·manifest 적재, 10분 슬롯과 호출별 `run_id`가 구현되어 있다. Ingest 경로, 전용 Model, dependency 조립 경계와 컨테이너 실행 경로도 전환했으며, 배포 설정 정리와 실제 GCP 환경의 독립 실행 검증은 Phase 1의 남은 작업이다.
+
+### 3.4 Terraform 인프라 구현 계획
+
+Ingest 인프라는 `terraform/ingest/` 독립 state root에서만 수정한다. 소유권, IAM, state, 삭제와 실행 경계는 [Terraform Rules](.agents/rules/terraform.md)를 따르며, 이 섹션에는 Ingest 전환에 필요한 구현 범위와 순서만 기록한다.
+
+#### 소유권 경계
+
+Terraform은 다음 항목을 소유한다.
+
+```text
+- Ingest가 직접 관리하는 Artifact Registry, Cloud Build, Cloud Scheduler, Firestore, IAM, Cloud Run, Cloud Storage API
+- Firestore (default) database와 raw GCS bucket
+- Ingest 전용 Artifact Registry repository
+- Cloud Build, Cloud Run runtime, Cloud Scheduler 서비스 계정과 개별 IAM 부여
+- Cloud Run 서비스 구성 (image·gcloud client metadata 제외)
+- main branch Cloud Build trigger
+- Cloud Scheduler job
+```
+
+다음 항목은 Terraform 소유에서 제외한다.
+
+```text
+- 사람이 연결한 Cloud Build 2세대 GitHub connection과 repository
+- 프로젝트 기반 선행 조건으로 이미 활성화된 Cloud Logging과 Cloud Resource Manager API
+- Cloud Build가 갱신하는 Cloud Run image와 gcloud가 기록하는 `client`·`client_version`
+- 사람이 운영 중 변경하는 Cloud Scheduler paused 필드
+- Google이 자동 관리하는 service agent와 그 IAM
+- 레거시 terraform/ root의 리소스와 state
+```
+
+수동 연결한 Cloud Build repository는 `briefolio-ingest` 프로젝트의 `us-west1`에 두고 전체 resource name을 Terraform 입력으로 전달한다. Cloud Run의 image와 gcloud가 배포 시 기록하는 `client`·`client_version`에는 `ignore_changes`를 적용하고 외부 갱신 주체가 `cloudbuild.yaml`임을 코드에 기록한다. Cloud Scheduler는 최초 생성 시 paused 상태를 보장하되 이후 pause와 resume은 운영자가 관리하며 Terraform은 해당 필드의 변경을 무시한다.
+
+#### 파일별 구현 범위
+
+| 파일 | 구현 내용 |
+| :--- | :--- |
+| `main.tf` | Terraform 최소 버전, Google Provider와 GCS backend, `service_name`·bootstrap image local, 프로젝트·region·수동 Cloud Build repository 변수 정의. Google Provider 5.45.2 lock은 유지 |
+| `apis.tf` | Artifact Registry, Cloud Build, Cloud Scheduler, Firestore, IAM, Cloud Run, Cloud Storage API 관리 |
+| `firestore.tf`, `cloud-storage.tf` | 기존 데이터 리소스와 `news_state.expires_at` TTL 유지. 삭제 관련 설정은 명시적으로 보존 |
+| `artifact-registry.tf` | `briefolio-ingest` 프로젝트의 `ingest-container` repository와 최신 image 3개 보존 cleanup policy 구성 |
+| `iam.tf` | Build, Runtime, Scheduler 서비스 계정과 additive IAM member 리소스 구성 |
+| `cloud-run.tf` | runtime identity, raw bucket 환경 변수, latest traffic, bootstrap image와 image·gcloud client metadata 소유권 예외 구성 |
+| `cloud-build.tf` | 수동 연결한 repository의 main push trigger, Build SA와 `cloudbuild.yaml` substitutions 구성 |
+| `cloud-scheduler.tf` | `POST /ingest/run`, OIDC, UTC 10분 주기, bootstrap용 paused 상태와 이후 운영자 소유 예외 구성 |
+| `imports.tf` | 실제 GCP 리소스가 존재하지만 state에 없을 때만 선언형 `import {}` 블록 추가 |
+
+`cloudbuild.yaml`은 commit SHA image의 build·push와 Cloud Run image 갱신만 명시하고 Terraform 명령은 실행하지 않는다. 배포 과정에서 gcloud가 함께 기록하는 `client`·`client_version`은 Cloud Build 소유로 두고 Terraform drift에서 제외한다. 레거시 Artifact Registry는 `gemini-ddev-hyeoncheol-1` 프로젝트의 별도 리소스이므로 Ingest state로 이동하지 않고 `briefolio-ingest`에 새로 생성한다.
+
+#### IAM 구성
+
+IAM은 policy 전체를 덮어쓰지 않고 다음 개별 부여만 Terraform이 소유한다.
+
+| 주체 | 권한 | 범위 |
+| :--- | :--- | :--- |
+| Build SA | `roles/cloudbuild.builds.editor` | Ingest 프로젝트 |
+| Build SA | `roles/logging.logWriter` | Ingest 프로젝트 |
+| Build SA | `roles/artifactregistry.writer` | Ingest Artifact Registry repository |
+| Build SA | `roles/run.developer` | Ingest Cloud Run 서비스 |
+| Build SA | `roles/iam.serviceAccountUser` | Runtime SA |
+| Build SA | `roles/iam.serviceAccountUser` | Build SA(자기 자신) |
+| Runtime SA | `roles/datastore.user` | Ingest 프로젝트 |
+| Runtime SA | `roles/storage.objectCreator` | raw GCS bucket |
+| Scheduler SA | `roles/run.invoker` | Ingest Cloud Run 서비스 |
+
+#### State와 삭제 정책
+
+구현 시작 시 `terraform state list`, `terraform state show`, `terraform plan`으로 Firestore와 GCS의 코드·state·실제 GCP ID 연결을 확인한다. 실제 리소스가 state에 없을 때만 `import {}` 블록을 추가하며 CLI import나 state 변경 명령은 사용하지 않는다.
+
+개발 단계에서는 Firestore의 `deletion_policy = "DELETE"`와 GCS의 `force_destroy = true`를 유지한다. plan에 데이터 삭제나 교체가 나타나면 대상을 보고하며, 삭제 보호 강화는 [DEBT](DEBT.md)의 적용 시점까지 보류한다. Firestore `news_state.expires_at`에는 7일 TTL 정책을 적용한다.
+
+Artifact Registry는 비용 제어를 위해 최신 image 3개를 보존하고 나머지 tagged·untagged version을 cleanup policy로 삭제한다.
+
+#### 부트스트랩 순서
+
+1. 사용자가 Cloud Build 2세대 GitHub connection과 repository를 `us-west1`에 수동 연결한다.
+2. Cloud Run은 공개 placeholder image로 생성하고 Cloud Scheduler는 `paused = true`로 생성하되 이후 paused 변경을 무시한다.
+3. 에이전트가 plan 결과를 보고하면 사용자가 검토 후 첫 apply를 직접 실행한다.
+4. 첫 apply 이후 main branch의 다음 push가 SHA image를 build·push하고 Cloud Run image만 갱신한다.
+5. 실제 Ingest image와 endpoint를 확인한 뒤 사용자가 Cloud Scheduler를 직접 resume한다.
+6. Scheduler가 인증된 `POST /ingest/run`을 호출하고 GCS·Firestore 결과를 생성하는지 확인한다.
+
+Trigger는 생성 이전의 main push를 소급 실행하지 않으므로 첫 apply 이후 새 push가 필요하다. Cloud Run 서비스가 삭제·재생성되면 다음 Cloud Build 배포 전까지 placeholder image로 실행되는 점을 허용한다. Cloud Scheduler job이 재생성되면 다시 paused 상태로 시작하므로 검증 후 운영자가 resume해야 한다.
+
+#### 검증과 완료 기준
+
+에이전트는 `terraform fmt`, `terraform validate`, read-only state 조회와 refresh를 포함한 `terraform plan`까지 수행한다. plan에서는 생성·변경·삭제·교체 대상, IAM policy·role·principal, Google service agent 영향, 데이터 삭제 위험, Cloud Run image·gcloud client metadata와 Cloud Scheduler paused 제외 여부를 확인해 보고한다. apply 결과에 의존하는 다음 단계는 사용자가 실행 완료를 알린 뒤 진행한다.
 
 ---
 
@@ -457,7 +542,7 @@ terraform/
   serving/       # briefolio-serving state root placeholder
 ```
 
-각 root(`ingest/`, `intelligence/`, `serving/`)는 `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`{경계}`). Ingest root에는 API, GCS, Firestore 리소스가 선언되어 있고, Intelligence와 Serving root는 현재 backend와 provider만 준비된 상태다.
+각 root(`ingest/`, `intelligence/`, `serving/`)는 `briefolio-tfstate` 버킷을 공유하되 `prefix`로 state 파일을 분리한다 (`{경계}`). Ingest root에는 API, GCS, Firestore, Artifact Registry, IAM, Cloud Run, Cloud Build trigger, Cloud Scheduler가 선언되어 있고, Intelligence와 Serving root는 현재 backend와 provider만 준비된 상태다.
 
 `seed/` root는 아직 없다. `briefolio-seed` project와 상태 버킷(`briefolio-tfstate`)은 `bootstrap.sh`로 생성했고, 현재 Terraform으로 관리할 추가 리소스가 없기 때문이다. 공유 CI/CD 같은 리소스가 필요해지면 그때 `terraform/seed/`를 추가한다.
 
@@ -718,16 +803,17 @@ Seed(`briefolio-seed`)와 Ingest(`briefolio-ingest`)는 이미 실제 GCP projec
 - bootstrap.sh로 Seed project와 remote state 버킷 생성
 - ingest / intelligence / serving별 Terraform root와 state prefix 분리
 - Seed와 Ingest GCP project 생성
-- Ingest GCS·Firestore 리소스 선언
+- Ingest GCS·Firestore·Artifact Registry·IAM·Cloud Run·Cloud Build·Cloud Scheduler 리소스 선언
 ```
 
 남은 작업:
 
 ```text
 - terraform/ 바로 아래 레거시 단일 프로젝트 리소스 제거
+- Ingest 배포 리소스 apply와 실제 GCP 통합 검증
 - Intelligence·Serving 구현 시 각 root에 실제 리소스 추가
 - cross-project IAM 구성
-- 경계별 CI/CD와 배포 설정 분리
+- Intelligence·Serving 구현 시 경계별 CI/CD와 배포 설정 추가
 - 다중 환경이 필요해질 때만 envs/dev, envs/prod 구성
 ```
 
@@ -876,4 +962,4 @@ src/
 - Intelligence 전용 src/ 디렉토리는 미리 만들지 않는다. Cloud Run fallback(3c)이 실제로 채택될 때만 src/intelligence/를 새로 만든다.
 ```
 
-`src/worker/` → `src/ingest/` 이동, Ingest 내부 책임 경계와 `Dockerfile`, `cloudbuild.yml`의 실행 경로 전환은 완료했다. `src/serving/`은 Serving 구현을 시작할 때 만들고, Terraform Cloud Run·Scheduler 리소스와 인증 주체는 Phase 1의 남은 작업으로 구성한다.
+`src/worker/` → `src/ingest/` 이동, Ingest 내부 책임 경계와 `Dockerfile`, `cloudbuild.yaml`의 실행 경로 전환은 완료했다. `src/serving/`은 Serving 구현을 시작할 때 만들고, Terraform Cloud Run·Scheduler 리소스와 인증 주체는 실제 GCP 적용과 검증을 Phase 1의 남은 작업으로 둔다.
